@@ -40,6 +40,7 @@ jobs:
           tags: |
             type=raw,value=latest
             type=ref,event=tag
+            type=ref,event=branche
             type=sha,format=short
 
       - name: 构建并推送 Docker 镜像
