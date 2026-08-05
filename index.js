@@ -1,10 +1,10 @@
 const fs = require('fs/promises');
-const { createWriteStream } = require('fs');
+const { createWriteStream } = require('fs'); // 引入 createWriteStream
 const path = require('path');
 const { spawn, exec } = require('child_process');
 const crypto = require('crypto');
 const util = require('util');
-const { pipeline } = require('stream/promises');
+const { pipeline } = require('stream/promises'); // 引入原生流式管道
 
 const execAsync = util.promisify(exec);
 
@@ -19,9 +19,12 @@ const CONFIG = {
     SERVER_IP: process.env.SERVER_IP || '127.0.0.1',
     XRAY_URL: 'https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip',
     ENABLE_XRAY: process.env.ENABLE_XRAY !== 'false',
+    ENABLE_PQ: process.env.ENABLE_PQ !== 'false',
     CUSTOM_DOMAIN: process.env.CUSTOM_DOMAIN || 'www.visa.com.sg',
     PERSIST_FILE: path.join(__dirname, '.sys_data')
 };
+
+CONFIG.FLOW = CONFIG.ENABLE_PQ ? 'xtls-rprx-vision' : '';
 
 const randomStr = () => crypto.randomBytes(4).toString('hex');
 const TMP = path.join(__dirname, 'tmp');
@@ -35,7 +38,7 @@ const FILES = {
 // 工具函数
 const exists = async (p) => fs.access(p).then(() => true).catch(() => false);
 
-// 流式管道（Pipeline）写入文件
+// 🌟 [核心修改点]：改用流式管道（Pipeline）写入文件，低内存存盘
 const download = async (url, dest) => {
     const res = await fetch(url);
     if (!res.ok || !res.body) throw new Error(`Download failed: ${res.statusText}`);
@@ -73,12 +76,21 @@ const State = {
         const xhttpPath = process.env.XHTTP_PATH || state.xhttp || '/' + randomStr();
         await State.save({ uuid, xhttp: xhttpPath });
 
+        let keys = state.keys || { 
+            decryption: process.env.VLESS_DECRYPTION || '', 
+            encryption: process.env.VLESS_ENCRYPTION || '' 
+        };
 
-        // 2. 节点链接生成函数 (已移除 TLS 与 PQ 参数)
+        // 2. 节点链接生成函数 (保证协议及参数格式不变)
         const genVlessLink = (host, port, remarks, isDomainLink) => {
-            const link = new URL(`vless://${uuid}@${isDomainLink ? CONFIG.CDN_HOST : host}:${port}`);
+            const link = new URL(`vless://${uuid}@${isDomainLink ? CONFIG.CDN_HOST : host}:${isDomainLink ? 443 : port}`);
             const params = link.searchParams;
-            params.set('security', 'none');
+            params.set('security', 'tls');
+            if (CONFIG.ENABLE_PQ && keys.encryption) params.set('encryption', keys.encryption);
+            if (CONFIG.FLOW) params.set('flow', CONFIG.FLOW);
+            params.set('sni', isDomainLink ? host : CONFIG.CDN_HOST);
+            params.set('fp', 'random');
+            params.set('alpn', 'h2');
             params.set('type', 'xhttp');
             params.set('path', xhttpPath);
             link.hash = remarks;
@@ -98,20 +110,48 @@ const State = {
             await fs.rename(findOut.trim(), FILES.BIN);
             await fs.chmod(FILES.BIN, 0o755);
 
-            // 4. 构建 Xray 配置
+            // 4. 获取或生成证书
+            let certArray = [], keyArray = [];
+            if (state.cert && state.key) {
+                certArray = state.cert.split('\n');
+                keyArray = state.key.split('\n');
+            } else {
+                try {
+                    const { stdout } = await execAsync(`${FILES.BIN} tls cert`, { encoding: 'utf-8' });
+                    const certData = JSON.parse(stdout);
+                    certArray = certData.certificate;
+                    keyArray = certData.key;
+                    await State.save({ cert: certArray.join('\n'), key: keyArray.join('\n') });
+                } catch {}
+            }
+
+            // 5. 获取 PQ 密钥
+            if (CONFIG.ENABLE_PQ && (!keys.decryption || !keys.encryption)) {
+                try {
+                    const { stdout } = await execAsync(`${FILES.BIN} vlessenc`, { encoding: 'utf-8' });
+                    const match = stdout.match(/ML-KEM-768[\s\S]+?"decryption":\s*"([^"]+)"[\s\S]+?"encryption":\s*"([^"]+)"/);
+                    if (match) {
+                        keys = { decryption: match[1], encryption: match[2] };
+                        await State.save({ keys });
+                    }
+                } catch {}
+            }
+
+            // 6. 构建 Xray 配置 (格式完全一致)
             const xrayConfig = {
                 log: { loglevel: 'none' },
                 inbounds: [{
                     port: CONFIG.PORT,
                     protocol: 'vless',
                     settings: {
-                        clients: [{ id: uuid }],
-                        decryption: "none"
+                        clients: [{ id: uuid, flow: CONFIG.FLOW }],
+                        decryption: (CONFIG.ENABLE_PQ && keys.decryption) ? keys.decryption : "none"
                     },
                     streamSettings: {
                         sockopt: { trustedXForwardedFor: ["CF-Connecting-IP", "X-Real-IP"], tcpcongestion: "bbr" },
                         network: "xhttp",
-                        security: "none",
+                        security: "tls",
+                        tlsSettings: { minVersion: "1.3", certificates: [{ certificate: certArray, key: keyArray }] },
                         xhttpSettings: { path: xhttpPath }
                     }
                 }],
@@ -121,6 +161,7 @@ const State = {
                         protocol: 'freedom',
                         tag: 'direct',
                         streamSettings: {
+                            finalmask: { tcp: [{ type: "fragment", settings: { packets: "tlshello", length: "100-200", delay: "10-20", maxSplit: "3-6" } }] },
                             sockopt: { tcpcongestion: 'bbr', domainStrategy: 'UseIP', happyEyeballs: { tryDelayMs: 250 } }
                         }
                     },
@@ -130,23 +171,20 @@ const State = {
 
             await fs.writeFile(FILES.CFG, JSON.stringify(xrayConfig));
 
-            // 5. 启动进程
+            // 7. 启动进程
             spawn(FILES.BIN, ['-c', FILES.CFG], { stdio: 'ignore', env: process.env })
                 .on('exit', () => process.exit(1));
 
-            // 6. 导出链接
+            // 8. 导出链接
             if (CONFIG.SERVER_IP) {
                 await saveLink(genVlessLink(CONFIG.SERVER_IP, CONFIG.PORT, `${CONFIG.LINK_NAME}-Direct`, false), 'Direct IP');
             }
             if (CONFIG.CUSTOM_DOMAIN) {
-                await saveLink(genVlessLink(CONFIG.CUSTOM_DOMAIN, CONFIG.PORT, CONFIG.LINK_NAME, true), 'Custom Domain');
+                await saveLink(genVlessLink(CONFIG.CUSTOM_DOMAIN, 443, CONFIG.LINK_NAME, true), 'Custom Domain');
             }
         }
 
         console.log('✅ Initialized successfully.');
-        // 🌟 打印 UUID 和 xhttpPath 日志
-        console.log(`🔑 UUID: ${uuid}`);
-        console.log(`🛣️  Path: ${xhttpPath}`);
     } catch (e) {
         console.error(e);
         process.exit(1);
