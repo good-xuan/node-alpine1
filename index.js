@@ -12,7 +12,7 @@ const execAsync = util.promisify(exec);
 // 1. 配置与常量
 // ==============================================================================
 const CONFIG = {
-    PORT: parseInt(process.env.SERVER_PORT || process.env.PORT || 3000),
+    PORT:  3000,
     UUID: process.env.UUID || '',
     LINK_NAME: process.env.LINK_NAME || 'Node',
     CDN_HOST: process.env.CDN_HOST || 'www.visa.com.sg',
