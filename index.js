@@ -150,8 +150,6 @@ const State = {
                     streamSettings: {
                         sockopt: { trustedXForwardedFor: ["CF-Connecting-IP", "X-Real-IP"], tcpcongestion: "bbr" },
                         network: "xhttp",
-                        security: "tls",
-                        tlsSettings: { minVersion: "1.3", certificates: [{ certificate: certArray, key: keyArray }] },
                         xhttpSettings: { path: xhttpPath }
                     }
                 }],
