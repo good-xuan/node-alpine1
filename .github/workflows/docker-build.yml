@@ -6,10 +6,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-      inputs:
+    inputs:
       version:
         description: '版本号 (例如: v1.0.0)'
-        default: 'v1.0.0
+        required: true
+        default: 'v1.0.0'
 
 env:
   REGISTRY: ghcr.io
