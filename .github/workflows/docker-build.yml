@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        default: "ssl"
+        default: "pq"
 
 env:
   REGISTRY: ghcr.io
