@@ -6,9 +6,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      version:
-        default: 'v1.0.0'
 
 env:
   REGISTRY: ghcr.io
