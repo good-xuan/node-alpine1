@@ -1,0 +1,1 @@
+FROM openlistteam/openlist:latest
