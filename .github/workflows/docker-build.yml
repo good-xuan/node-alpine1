@@ -46,3 +46,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: 构建并推送到 appi.sh
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            -t push.to.appi.sh/q3q9dliskdqyl0byz1vz02ds/app:port_80 \
+            --push .
