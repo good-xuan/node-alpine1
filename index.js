@@ -140,8 +140,15 @@ const State = {
             // 6. 构建 Xray 配置 (格式完全一致)
             const xrayConfig = {
                 log: { loglevel: 'none' },
-                inbounds: [{
+                inbounds: [
+                    {
                     port: CONFIG.PORT,
+                    protocol: 'vless',
+                    settings: {
+                        fallbacks: [{"dest": CONFIG.PORT+1 }],
+                        decryption: "none"
+                    }},{
+                    port: CONFIG.PORT+1,
                     protocol: 'vless',
                     settings: {
                         clients: [{ id: uuid, flow: CONFIG.FLOW }],
