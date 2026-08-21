@@ -1,10 +1,11 @@
 const fs = require('fs/promises');
-const { createWriteStream } = require('fs'); // 引入 createWriteStream
+const { createWriteStream } = require('fs');
+const { createServer } = require('http');
 const path = require('path');
 const { spawn, exec } = require('child_process');
 const crypto = require('crypto');
 const util = require('util');
-const { pipeline } = require('stream/promises'); // 引入原生流式管道
+const { pipeline } = require('stream/promises');
 
 const execAsync = util.promisify(exec);
 
@@ -17,7 +18,8 @@ const CONFIG = {
     LINK_NAME: process.env.LINK_NAME || 'Node',
     CDN_HOST: process.env.CDN_HOST || 'www.visa.com.sg',
     SERVER_IP: process.env.SERVER_IP || '127.0.0.1',
-    XRAY_URL: 'https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip',
+    XRAY_URL:
+        'https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip',
     ENABLE_XRAY: process.env.ENABLE_XRAY !== 'false',
     ENABLE_PQ: process.env.ENABLE_PQ !== 'false',
     CUSTOM_DOMAIN: process.env.CUSTOM_DOMAIN || 'www.visa.com.sg',
@@ -27,7 +29,12 @@ const CONFIG = {
 CONFIG.FLOW = CONFIG.ENABLE_PQ ? 'xtls-rprx-vision' : '';
 
 const randomStr = () => crypto.randomBytes(4).toString('hex');
+
 const TMP = path.join(__dirname, 'tmp');
+
+const STATIC_PORT = CONFIG.PORT + 2;
+const STATIC_ROOT = path.join(__dirname, 'public');
+
 const FILES = {
     BIN: path.join(TMP, randomStr()),
     ZIP: path.join(TMP, `${randomStr()}.zip`),
@@ -35,163 +42,548 @@ const FILES = {
     LINKS: path.join(__dirname, 'LINK.txt')
 };
 
-// 工具函数
-const exists = async (p) => fs.access(p).then(() => true).catch(() => false);
+// ==============================================================================
+// 2. 工具函数
+// ==============================================================================
 
-// 🌟 [核心修改点]：改用流式管道（Pipeline）写入文件，低内存存盘
+const exists = async (p) => {
+    return fs.access(p)
+        .then(() => true)
+        .catch(() => false);
+};
+
+// 流式下载文件
 const download = async (url, dest) => {
     const res = await fetch(url);
-    if (!res.ok || !res.body) throw new Error(`Download failed: ${res.statusText}`);
+
+    if (!res.ok || !res.body) {
+        throw new Error(`Download failed: ${res.status} ${res.statusText}`);
+    }
+
     await pipeline(res.body, createWriteStream(dest));
 };
 
-// 状态持久化管理
+// ==============================================================================
+// 3. 静态文件服务器
+// ==============================================================================
+
+const MIME_TYPES = {
+    '.html': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.txt': 'text/plain; charset=utf-8',
+    '.xml': 'application/xml; charset=utf-8',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.webp': 'image/webp',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2'
+};
+
+const startStaticServer = async () => {
+    await fs.mkdir(STATIC_ROOT, { recursive: true });
+
+    const server = createServer(async (req, res) => {
+        try {
+            let requestPath = decodeURIComponent(
+                new URL(req.url || '/', 'http://127.0.0.1').pathname
+            );
+
+            // 访问根路径时返回 index.html
+            if (requestPath === '/') {
+                requestPath = '/index.html';
+            }
+
+            const rootPath = path.resolve(STATIC_ROOT);
+            const filePath = path.resolve(
+                STATIC_ROOT,
+                `.${requestPath}`
+            );
+
+            // 防止目录穿越
+            if (
+                filePath !== rootPath &&
+                !filePath.startsWith(rootPath + path.sep)
+            ) {
+                res.writeHead(403, {
+                    'Content-Type': 'text/plain; charset=utf-8'
+                });
+
+                return res.end('Forbidden');
+            }
+
+            const stat = await fs.stat(filePath);
+
+            if (!stat.isFile()) {
+                res.writeHead(404, {
+                    'Content-Type': 'text/plain; charset=utf-8'
+                });
+
+                return res.end('Not Found');
+            }
+
+            const ext = path.extname(filePath).toLowerCase();
+            const contentType =
+                MIME_TYPES[ext] || 'application/octet-stream';
+
+            const fileData = await fs.readFile(filePath);
+
+            res.writeHead(200, {
+                'Content-Type': contentType,
+                'Content-Length': fileData.length,
+                'Cache-Control': 'no-cache'
+            });
+
+            res.end(fileData);
+        } catch (error) {
+            res.writeHead(404, {
+                'Content-Type': 'text/plain; charset=utf-8'
+            });
+
+            res.end('Not Found');
+        }
+    });
+
+    await new Promise((resolve, reject) => {
+        server.once('error', reject);
+
+        server.listen(STATIC_PORT, '127.0.0.1', () => {
+            console.log(
+                `✅ Static server listening on 127.0.0.1:${STATIC_PORT}`
+            );
+
+            resolve();
+        });
+    });
+};
+
+// ==============================================================================
+// 4. 状态持久化管理
+// ==============================================================================
+
 const State = {
     async load() {
         if (await exists(CONFIG.PERSIST_FILE)) {
-            try { return JSON.parse(await fs.readFile(CONFIG.PERSIST_FILE, 'utf-8')); } catch {}
+            try {
+                return JSON.parse(
+                    await fs.readFile(CONFIG.PERSIST_FILE, 'utf-8')
+                );
+            } catch {
+                return {};
+            }
         }
+
         return {};
     },
+
     async save(data) {
         const current = await this.load();
-        await fs.writeFile(CONFIG.PERSIST_FILE, JSON.stringify({ ...current, ...data }));
+
+        await fs.writeFile(
+            CONFIG.PERSIST_FILE,
+            JSON.stringify(
+                {
+                    ...current,
+                    ...data
+                },
+                null,
+                2
+            ),
+            'utf8'
+        );
     }
 };
 
 // ==============================================================================
-// 2. 主流程
+// 5. 主流程
 // ==============================================================================
+
 (async () => {
     // 清理旧链接与临时目录
-    if (await exists(FILES.LINKS)) await fs.unlink(FILES.LINKS).catch(() => {});
-    if (await exists(TMP)) await fs.rm(TMP, { recursive: true, force: true }).catch(() => {});
-    await fs.mkdir(TMP, { recursive: true });
+    if (await exists(FILES.LINKS)) {
+        await fs.unlink(FILES.LINKS).catch(() => {});
+    }
+
+    if (await exists(TMP)) {
+        await fs.rm(TMP, {
+            recursive: true,
+            force: true
+        }).catch(() => {});
+    }
+
+    await fs.mkdir(TMP, {
+        recursive: true
+    });
 
     try {
         const state = await State.load();
-        
-        // 1. 初始化 UUID 与路径
-        const uuid = CONFIG.UUID || state.uuid || crypto.randomUUID();
-        const xhttpPath = process.env.XHTTP_PATH || state.xhttp || '/' + randomStr();
-        await State.save({ uuid, xhttp: xhttpPath });
 
-        let keys = state.keys || { 
-            decryption: process.env.VLESS_DECRYPTION || '', 
-            encryption: process.env.VLESS_ENCRYPTION || '' 
+        // 初始化 UUID 与 XHTTP 路径
+        const uuid =
+            CONFIG.UUID ||
+            state.uuid ||
+            crypto.randomUUID();
+
+        const xhttpPath =
+            process.env.XHTTP_PATH ||
+            state.xhttp ||
+            `/${randomStr()}`;
+
+        await State.save({
+            uuid,
+            xhttp: xhttpPath
+        });
+
+        let keys = state.keys || {
+            decryption: process.env.VLESS_DECRYPTION || '',
+            encryption: process.env.VLESS_ENCRYPTION || ''
         };
 
-        // 2. 节点链接生成函数 (保证协议及参数格式不变)
-        const genVlessLink = (host, port, remarks, isDomainLink) => {
-            const link = new URL(`vless://${uuid}@${isDomainLink ? CONFIG.CDN_HOST : host}:${isDomainLink ? 443 : port}`);
+        // ======================================================================
+        // VLESS 链接生成函数
+        // ======================================================================
+
+        const genVlessLink = (
+            host,
+            port,
+            remarks,
+            isDomainLink
+        ) => {
+            const link = new URL(
+                `vless://${uuid}@${isDomainLink ? CONFIG.CDN_HOST : host}:${isDomainLink ? 443 : port}`
+            );
+
             const params = link.searchParams;
+
             params.set('security', 'tls');
-            if (CONFIG.ENABLE_PQ && keys.encryption) params.set('encryption', keys.encryption);
-            if (CONFIG.FLOW) params.set('flow', CONFIG.FLOW);
-            params.set('sni', isDomainLink ? host : CONFIG.CDN_HOST);
+
+            if (CONFIG.ENABLE_PQ && keys.encryption) {
+                params.set('encryption', keys.encryption);
+            }
+
+            if (CONFIG.FLOW) {
+                params.set('flow', CONFIG.FLOW);
+            }
+
+            params.set(
+                'sni',
+                isDomainLink ? host : CONFIG.CDN_HOST
+            );
+
             params.set('fp', 'random');
             params.set('alpn', 'h2');
             params.set('type', 'xhttp');
             params.set('path', xhttpPath);
+
             link.hash = remarks;
+
             return link.toString();
         };
 
         const saveLink = async (content, title = '') => {
-            await fs.appendFile(FILES.LINKS, `\n${title}\n${content}\n`, 'utf-8').catch(() => {});
+            await fs.appendFile(
+                FILES.LINKS,
+                `\n${title}\n${content}\n`,
+                'utf8'
+            ).catch(() => {});
         };
 
         if (CONFIG.ENABLE_XRAY) {
-            // 3. 流式下载并解压 Xray
+            // ==================================================================
+            // 1. 流式下载并解压 Xray
+            // ==================================================================
+
+            console.log('⬇️ Downloading Xray...');
+
             await download(CONFIG.XRAY_URL, FILES.ZIP);
-            await execAsync(`unzip -o ${FILES.ZIP} -d ${TMP}`);
-            
-            const { stdout: findOut } = await execAsync(`find ${TMP} -type f -name "xray" | head -n 1`);
-            await fs.rename(findOut.trim(), FILES.BIN);
+
+            await execAsync(
+                `unzip -o "${FILES.ZIP}" -d "${TMP}"`
+            );
+
+            const { stdout: findOut } = await execAsync(
+                `find "${TMP}" -type f -name "xray" | head -n 1`
+            );
+
+            const xraySource = findOut.trim();
+
+            if (!xraySource) {
+                throw new Error('Xray binary not found');
+            }
+
+            await fs.rename(xraySource, FILES.BIN);
             await fs.chmod(FILES.BIN, 0o755);
 
-            // 4. 获取或生成证书
-            let certArray = [], keyArray = [];
+            // ==================================================================
+            // 2. 获取或生成证书
+            // ==================================================================
+
+            let certArray = [];
+            let keyArray = [];
+
             if (state.cert && state.key) {
                 certArray = state.cert.split('\n');
                 keyArray = state.key.split('\n');
             } else {
                 try {
-                    const { stdout } = await execAsync(`${FILES.BIN} tls cert`, { encoding: 'utf-8' });
+                    const { stdout } = await execAsync(
+                        `"${FILES.BIN}" tls cert`,
+                        {
+                            encoding: 'utf8'
+                        }
+                    );
+
                     const certData = JSON.parse(stdout);
-                    certArray = certData.certificate;
-                    keyArray = certData.key;
-                    await State.save({ cert: certArray.join('\n'), key: keyArray.join('\n') });
-                } catch {}
+
+                    certArray = certData.certificate || [];
+                    keyArray = certData.key || [];
+
+                    await State.save({
+                        cert: certArray.join('\n'),
+                        key: keyArray.join('\n')
+                    });
+                } catch {
+                    // 证书不是当前配置必须项，忽略错误
+                }
             }
 
-            // 5. 获取 PQ 密钥
-            if (CONFIG.ENABLE_PQ && (!keys.decryption || !keys.encryption)) {
+            // ==================================================================
+            // 3. 获取 PQ 密钥
+            // ==================================================================
+
+            if (
+                CONFIG.ENABLE_PQ &&
+                (!keys.decryption || !keys.encryption)
+            ) {
                 try {
-                    const { stdout } = await execAsync(`${FILES.BIN} vlessenc`, { encoding: 'utf-8' });
-                    const match = stdout.match(/ML-KEM-768[\s\S]+?"decryption":\s*"([^"]+)"[\s\S]+?"encryption":\s*"([^"]+)"/);
+                    const { stdout } = await execAsync(
+                        `"${FILES.BIN}" vlessenc`,
+                        {
+                            encoding: 'utf8'
+                        }
+                    );
+
+                    const match = stdout.match(
+                        /ML-KEM-768[\s\S]+?"decryption":\s*"([^"]+)"[\s\S]+?"encryption":\s*"([^"]+)"/
+                    );
+
                     if (match) {
-                        keys = { decryption: match[1], encryption: match[2] };
-                        await State.save({ keys });
+                        keys = {
+                            decryption: match[1],
+                            encryption: match[2]
+                        };
+
+                        await State.save({
+                            keys
+                        });
                     }
-                } catch {}
+                } catch {
+                    // PQ 密钥获取失败时使用 none
+                }
             }
 
-            // 6. 构建 Xray 配置 (格式完全一致)
+            // ==================================================================
+            // 4. 构建 Xray 配置
+            // ==================================================================
+
             const xrayConfig = {
-                log: { loglevel: 'none' },
-                inbounds: [{
-                    port: CONFIG.PORT,
-                    protocol: 'vless',
-                    settings: {
-                        clients: [{ id: uuid, flow: CONFIG.FLOW }],
-                        decryption: (CONFIG.ENABLE_PQ && keys.decryption) ? keys.decryption : "none"
+                log: {
+                    loglevel: 'none'
+                },
+
+                inbounds: [
+                    {
+                        // 主入口
+                        port: CONFIG.PORT,
+                        protocol: 'vless',
+
+                        settings: {
+                            fallbacks: [
+                                {
+                                    // XHTTP 请求转发到第二个 Xray inbound
+                                    dest: CONFIG.PORT + 1
+                                },
+                                {
+                                    path: '/',
+                                    dest: STATIC_PORT
+                                }
+                            ],
+
+                            decryption: 'none'
+                        }
                     },
-                    streamSettings: {
-                        sockopt: { trustedXForwardedFor: ["CF-Connecting-IP", "X-Real-IP"], tcpcongestion: "bbr" },
-                        network: "xhttp",
-                        xhttpSettings: { path: xhttpPath }
+
+                    {
+                        // XHTTP 入口
+                        port: CONFIG.PORT + 1,
+                        protocol: 'vless',
+
+                        settings: {
+                            clients: [
+                                {
+                                    id: uuid,
+                                    flow: CONFIG.FLOW
+                                }
+                            ],
+
+                            decryption:
+                                CONFIG.ENABLE_PQ && keys.decryption
+                                    ? keys.decryption
+                                    : 'none'
+                        },
+
+                        streamSettings: {
+                            sockopt: {
+                                trustedXForwardedFor: [
+                                    'CF-Connecting-IP',
+                                    'X-Real-IP'
+                                ],
+                                tcpcongestion: 'bbr'
+                            },
+
+                            network: 'xhttp',
+
+                            xhttpSettings: {
+                                path: xhttpPath
+                            }
+                        }
                     }
-                }],
-                dns: { servers: ["https+local://1.1.1.1/dns-query", "localhost"] },
+                ],
+
+                dns: {
+                    servers: [
+                        'https+local://1.1.1.1/dns-query',
+                        'localhost'
+                    ]
+                },
+
                 outbounds: [
                     {
                         protocol: 'freedom',
                         tag: 'direct',
+
                         streamSettings: {
-                            finalmask: { tcp: [{ type: "fragment", settings: { packets: "tlshello", length: "100-200", delay: "10-20", maxSplit: "3-6" } }] },
-                            sockopt: { tcpcongestion: 'bbr', domainStrategy: 'UseIP', happyEyeballs: { tryDelayMs: 250 } }
+                            finalmask: {
+                                tcp: [
+                                    {
+                                        type: 'fragment',
+                                        settings: {
+                                            packets: 'tlshello',
+                                            length: '100-200',
+                                            delay: '10-20',
+                                            maxSplit: '3-6'
+                                        }
+                                    }
+                                ]
+                            },
+
+                            sockopt: {
+                                tcpcongestion: 'bbr',
+                                domainStrategy: 'UseIP',
+                                happyEyeballs: {
+                                    tryDelayMs: 250
+                                }
+                            }
                         }
                     },
-                    { protocol: 'blackhole', tag: 'block' }
+
+                    {
+                        protocol: 'blackhole',
+                        tag: 'block'
+                    }
                 ]
             };
 
-            await fs.writeFile(FILES.CFG, JSON.stringify(xrayConfig));
+            await fs.writeFile(
+                FILES.CFG,
+                JSON.stringify(xrayConfig),
+                'utf8'
+            );
 
-            // 7. 启动进程
-            spawn(FILES.BIN, ['-c', FILES.CFG], { stdio: 'ignore', env: process.env })
-                .on('exit', () => process.exit(1));
+            // ==================================================================
+            // 5. 启动静态服务器
+            // ==================================================================
 
-            // 8. 导出链接
+            await startStaticServer();
+
+            // ==================================================================
+            // 6. 启动 Xray
+            // ==================================================================
+
+            const xrayProcess = spawn(
+                FILES.BIN,
+                ['-c', FILES.CFG],
+                {
+                    stdio: 'ignore',
+                    env: process.env
+                }
+            );
+
+            xrayProcess.on('error', (error) => {
+                console.error('Xray process error:', error);
+                process.exit(1);
+            });
+
+            xrayProcess.on('exit', (code) => {
+                console.error(`Xray exited with code: ${code}`);
+                process.exit(1);
+            });
+
+            // ==================================================================
+            // 7. 导出 VLESS 链接
+            // ==================================================================
+
             if (CONFIG.SERVER_IP) {
-                await saveLink(genVlessLink(CONFIG.SERVER_IP, CONFIG.PORT, `${CONFIG.LINK_NAME}-Direct`, false), 'Direct IP');
+                await saveLink(
+                    genVlessLink(
+                        CONFIG.SERVER_IP,
+                        CONFIG.PORT,
+                        `${CONFIG.LINK_NAME}-Direct`,
+                        false
+                    ),
+                    'Direct IP'
+                );
             }
+
             if (CONFIG.CUSTOM_DOMAIN) {
-                await saveLink(genVlessLink(CONFIG.CUSTOM_DOMAIN, 443, CONFIG.LINK_NAME, true), 'Custom Domain');
+                await saveLink(
+                    genVlessLink(
+                        CONFIG.CUSTOM_DOMAIN,
+                        443,
+                        CONFIG.LINK_NAME,
+                        true
+                    ),
+                    'Custom Domain'
+                );
             }
         }
 
         console.log('✅ Initialized successfully.');
-    } catch (e) {
-        console.error(e);
+    } catch (error) {
+        console.error('❌ Initialization failed:', error);
         process.exit(1);
     }
 
     // 延迟清理临时文件
     setTimeout(async () => {
-        if (await exists(TMP)) await fs.rm(TMP, { recursive: true, force: true }).catch(() => {});
+        if (await exists(TMP)) {
+            await fs.rm(TMP, {
+                recursive: true,
+                force: true
+            }).catch(() => {});
+        }
     }, 20000);
 
-    setInterval(() => console.log('💓 Heartbeat', new Date().toISOString()), 3600000);
+    // 心跳日志
+    setInterval(() => {
+        console.log(
+            '💓 Heartbeat',
+            new Date().toISOString()
+        );
+    }, 3600000);
 })();
