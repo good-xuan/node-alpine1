@@ -12,6 +12,7 @@ COPY package*.json ./
 
 # 复制脚本源码
 COPY index.js ./
+COPY public/ ./public/
 
 # 暴露端口（默认 3000）
 EXPOSE 3000
