@@ -406,11 +406,10 @@ const State = {
                             fallbacks: [
                                 {
                                     // XHTTP 请求转发到第二个 Xray inbound
-                                    path: xhttpPath,
                                     dest: CONFIG.PORT + 1
                                 },
                                 {
-                                    // 普通 HTTP 请求转发到静态服务器
+                                    path: '/',
                                     dest: STATIC_PORT
                                 }
                             ],
