@@ -145,7 +145,7 @@ const State = {
                     port: CONFIG.PORT,
                     protocol: 'vless',
                     settings: {
-                        fallbacks: [{"dest": CONFIG.PORT+1 }],
+                        fallbacks: [{ path: xhttpPath, dest: CONFIG.PORT+1 }],
                         decryption: "none"
                     }},{
                     port: CONFIG.PORT+1,
