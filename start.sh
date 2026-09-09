@@ -6,8 +6,13 @@ BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 TMP="$BASE_DIR/tmp"
 PUBLIC_DIR="$BASE_DIR/public"
+
 STATE_FILE="$BASE_DIR/.sys_data"
 LINK_FILE="$BASE_DIR/LINK.txt"
+
+DECRYPTION_FILE="$BASE_DIR/.vless_decryption"
+ENCRYPTION_FILE="$BASE_DIR/.vless_encryption"
+
 CONFIG_FILE="$TMP/config.json"
 ZIP_FILE="$TMP/xray.zip"
 BIN_FILE="$TMP/xray"
@@ -18,6 +23,7 @@ LINK_NAME="${LINK_NAME:-Node}"
 CDN_HOST="${CDN_HOST:-www.visa.com.sg}"
 SERVER_IP="${SERVER_IP:-127.0.0.1}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-www.visa.com.sg}"
+
 ENABLE_XRAY="${ENABLE_XRAY:-true}"
 ENABLE_PQ="${ENABLE_PQ:-true}"
 
@@ -57,14 +63,16 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-# 清理临时目录，但保留持久化状态文件
+# 清理临时目录
 rm -rf "$TMP"
+
 mkdir -p "$TMP"
 mkdir -p "$PUBLIC_DIR"
 
+# 每次启动重新生成链接文件
 rm -f "$LINK_FILE"
 
-# 读取持久化状态
+# 读取状态文件
 if [ -f "$STATE_FILE" ] &&
     jq empty "$STATE_FILE" >/dev/null 2>&1; then
     STATE="$(cat "$STATE_FILE")"
@@ -72,7 +80,7 @@ else
     STATE='{}'
 fi
 
-# UUID
+# 读取或生成 UUID
 if [ -z "$UUID" ]; then
     UUID="$(printf '%s' "$STATE" | jq -r '.uuid // empty')"
 fi
@@ -81,11 +89,14 @@ if [ -z "$UUID" ]; then
     UUID="$(cat /proc/sys/kernel/random/uuid)"
 fi
 
-# XHTTP 路径
+# 读取或生成 XHTTP 路径
 XHTTP_PATH="${XHTTP_PATH:-}"
 
 if [ -z "$XHTTP_PATH" ]; then
-    XHTTP_PATH="$(printf '%s' "$STATE" | jq -r '.xhttp // empty')"
+    XHTTP_PATH="$(
+        printf '%s' "$STATE" |
+            jq -r '.xhttp // empty'
+    )"
 fi
 
 if [ -z "$XHTTP_PATH" ]; then
@@ -111,20 +122,20 @@ save_state() {
 
 save_state
 
-# 读取已保存的 ML-KEM 密钥
+# 读取 ML-KEM 密钥
+# 这里不使用 jq，密钥保存为单独的纯文本文件
 DECRYPTION=""
 ENCRYPTION=""
 
-if [ -f "$STATE_FILE" ]; then
-    DECRYPTION="$(
-        jq -r '.keys.decryption // empty' "$STATE_FILE" 2>/dev/null || true
-    )"
-
-    ENCRYPTION="$(
-        jq -r '.keys.encryption // empty' "$STATE_FILE" 2>/dev/null || true
-    )"
+if [ -f "$DECRYPTION_FILE" ]; then
+    DECRYPTION="$(cat "$DECRYPTION_FILE")"
 fi
 
+if [ -f "$ENCRYPTION_FILE" ]; then
+    ENCRYPTION="$(cat "$ENCRYPTION_FILE")"
+fi
+
+# 环境变量优先级更高
 if [ -n "${VLESS_DECRYPTION:-}" ]; then
     DECRYPTION="$VLESS_DECRYPTION"
 fi
@@ -144,6 +155,7 @@ if [ "$ENABLE_XRAY" = "false" ]; then
 
     while :; do
         sleep 3600
+
         printf 'Heartbeat %s\n' \
             "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     done
@@ -162,8 +174,8 @@ unzip -oq "$ZIP_FILE" -d "$TMP"
 XRAY_SOURCE="$(
     find "$TMP" \
         -type f \
-        -name xray \
-        | head -n 1
+        -name xray |
+        head -n 1
 )"
 
 if [ -z "$XRAY_SOURCE" ]; then
@@ -174,29 +186,60 @@ fi
 mv "$XRAY_SOURCE" "$BIN_FILE"
 chmod 755 "$BIN_FILE"
 
+# 从 xray vlessenc 输出中提取字段
+# 不使用 jq，兼容 JSON 和普通文本形式
+extract_mlkem_key() {
+    KEY_NAME="$1"
+
+    printf '%s\n' "$VLESSENC_OUTPUT" |
+        awk -v key="$KEY_NAME" '
+            BEGIN {
+                IGNORECASE = 1
+            }
+
+            {
+                line = $0
+
+                if (line !~ key) {
+                    next
+                }
+
+                # JSON 格式：
+                # "decryption": "value"
+                # "encryption": "value"
+                if (line ~ key "[^:]*:[[:space:]]*") {
+                    sub("^[^" key "]*" key "[^:]*:[[:space:]]*", "", line)
+                } else {
+                    # 普通文本格式：
+                    # decryption value
+                    # encryption value
+                    sub("^[^" key "]*" key "[[:space:]]+", "", line)
+                }
+
+                # 去除引号、逗号、空格和 JSON 尾部字符
+                gsub(/^[ "'\''\t]+/, "", line)
+                gsub(/["'\'' ,}\t]+$/, "", line)
+
+                if (line != "") {
+                    print line
+                    exit
+                }
+            }
+        '
+}
+
 # 自动生成 ML-KEM 密钥
 if [ "$ENABLE_PQ" != "false" ] &&
     { [ -z "$DECRYPTION" ] || [ -z "$ENCRYPTION" ]; }; then
 
-    log "Generating VLESS encryption keys..."
+    log "Generating VLESS ML-KEM keys..."
 
     VLESSENC_OUTPUT="$(
         "$BIN_FILE" vlessenc 2>/dev/null || true
     )"
 
-    NEW_DECRYPTION="$(
-        printf '%s' "$VLESSENC_OUTPUT" |
-            sed -n \
-                's/.*"decryption"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-            head -n 1
-    )"
-
-    NEW_ENCRYPTION="$(
-        printf '%s' "$VLESSENC_OUTPUT" |
-            sed -n \
-                's/.*"encryption"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-            head -n 1
-    )"
+    NEW_DECRYPTION="$(extract_mlkem_key decryption)"
+    NEW_ENCRYPTION="$(extract_mlkem_key encryption)"
 
     if [ -n "$NEW_DECRYPTION" ] &&
         [ -n "$NEW_ENCRYPTION" ]; then
@@ -204,19 +247,17 @@ if [ "$ENABLE_PQ" != "false" ] &&
         DECRYPTION="$NEW_DECRYPTION"
         ENCRYPTION="$NEW_ENCRYPTION"
 
-        jq \
-            --arg decryption "$DECRYPTION" \
-            --arg encryption "$ENCRYPTION" \
-            '. + {
-                keys: {
-                    decryption: $decryption,
-                    encryption: $encryption
-                }
-            }' \
-            "$STATE_FILE" \
-            > "$STATE_FILE.tmp"
+        # 纯文本保存，不使用 jq
+        printf '%s\n' "$DECRYPTION" > "$DECRYPTION_FILE"
+        printf '%s\n' "$ENCRYPTION" > "$ENCRYPTION_FILE"
 
-        mv "$STATE_FILE.tmp" "$STATE_FILE"
+        chmod 600 \
+            "$DECRYPTION_FILE" \
+            "$ENCRYPTION_FILE"
+
+        log "ML-KEM keys saved."
+    else
+        log "Warning: ML-KEM keys were not generated."
     fi
 fi
 
@@ -356,7 +397,7 @@ wget \
     -O "$PUBLIC_DIR/index.html" \
     "$INDEX_URL"
 
-# 使用 lighttpd 提供静态页面
+# 生成 lighttpd 配置
 LIGHTTPD_CONF="$TMP/lighttpd.conf"
 
 cat > "$LIGHTTPD_CONF" <<EOF
@@ -497,7 +538,7 @@ log "Links saved to: $LINK_FILE"
 log "Xray PID: $XRAY_PID"
 log "lighttpd PID: $HTTP_PID"
 
-# 保持容器主进程运行
+# 保持容器运行
 while :; do
     sleep 3600
 
