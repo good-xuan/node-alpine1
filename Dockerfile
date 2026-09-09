@@ -1,20 +1,22 @@
-# 使用 Alpine 版 Node.js 镜像（体积小，性能高）
-FROM node:26-alpine
+FROM alpine:3.24
 
-# 安装执行 index.js 所需的系统依赖 (unzip 和 findutils/find)
-RUN apk add --no-cache unzip findutils ca-certificates
+RUN apk add --no-cache \
+        ca-certificates \
+        wget \
+        unzip \
+        jq \
+        gcompat \
+        libstdc++ \
+    && update-ca-certificates
 
-# 设置工作目录
 WORKDIR /app
 
-# 复制 package.json
-COPY package*.json ./
+COPY start.sh /app/start.sh
 
-# 复制脚本源码
-COPY index.js ./
+RUN chmod +x /app/start.sh
 
-# 暴露端口（默认 3000）
 EXPOSE 3000
 
-# 启动 Node.js 应用
-CMD ["node", "index.js"]
+STOPSIGNAL SIGTERM
+
+ENTRYPOINT ["/app/start.sh"]
