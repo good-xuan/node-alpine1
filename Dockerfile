@@ -7,6 +7,7 @@ RUN apk add --no-cache \
         jq \
         gcompat \
         libstdc++ \
+        lighttpd \
     && update-ca-certificates
 
 WORKDIR /app
