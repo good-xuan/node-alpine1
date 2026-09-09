@@ -20,12 +20,16 @@ BIN_FILE="$TMP/xray"
 PORT="${SERVER_PORT:-${PORT:-3000}}"
 UUID="${UUID:-}"
 LINK_NAME="${LINK_NAME:-Node}"
+
 CDN_HOST="${CDN_HOST:-www.visa.com.sg}"
 SERVER_IP="${SERVER_IP:-127.0.0.1}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-www.visa.com.sg}"
 
 ENABLE_XRAY="${ENABLE_XRAY:-true}"
 ENABLE_PQ="${ENABLE_PQ:-true}"
+
+# true 时强制重新生成一对 ML-KEM-768 密钥
+ROTATE_PQ_KEYS="${ROTATE_PQ_KEYS:-false}"
 
 XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 
@@ -122,33 +126,9 @@ save_state() {
 
 save_state
 
-# 读取 ML-KEM 密钥
-# 这里不使用 jq，密钥保存为单独的纯文本文件
-DECRYPTION=""
-ENCRYPTION=""
-
-if [ -f "$DECRYPTION_FILE" ]; then
-    DECRYPTION="$(cat "$DECRYPTION_FILE")"
-fi
-
-if [ -f "$ENCRYPTION_FILE" ]; then
-    ENCRYPTION="$(cat "$ENCRYPTION_FILE")"
-fi
-
-# 环境变量优先级更高
-if [ -n "${VLESS_DECRYPTION:-}" ]; then
-    DECRYPTION="$VLESS_DECRYPTION"
-fi
-
-if [ -n "${VLESS_ENCRYPTION:-}" ]; then
-    ENCRYPTION="$VLESS_ENCRYPTION"
-fi
-
-FLOW=""
-
-if [ "$ENABLE_PQ" != "false" ]; then
-    FLOW="xtls-rprx-vision"
-fi
+# ------------------------------
+# 下载 Xray
+# ------------------------------
 
 if [ "$ENABLE_XRAY" = "false" ]; then
     log "ENABLE_XRAY=false, Xray was not started."
@@ -186,93 +166,166 @@ fi
 mv "$XRAY_SOURCE" "$BIN_FILE"
 chmod 755 "$BIN_FILE"
 
-# 从 xray vlessenc 输出中提取字段
-# 不使用 jq，兼容 JSON 和普通文本形式
+# ------------------------------
+# 读取和生成 ML-KEM-768 密钥
+# ------------------------------
+
+read_key_file() {
+    FILE="$1"
+
+    if [ -f "$FILE" ]; then
+        tr -d '\r' < "$FILE" |
+            sed 's/[[:space:]]*$//'
+    fi
+}
+
+DECRYPTION=""
+ENCRYPTION=""
+
+if [ -f "$DECRYPTION_FILE" ]; then
+    DECRYPTION="$(read_key_file "$DECRYPTION_FILE")"
+fi
+
+if [ -f "$ENCRYPTION_FILE" ]; then
+    ENCRYPTION="$(read_key_file "$ENCRYPTION_FILE")"
+fi
+
+# 环境变量优先级更高
+if [ -n "${VLESS_DECRYPTION:-}" ]; then
+    DECRYPTION="$VLESS_DECRYPTION"
+fi
+
+if [ -n "${VLESS_ENCRYPTION:-}" ]; then
+    ENCRYPTION="$VLESS_ENCRYPTION"
+fi
+
+# 只接受 ML-KEM-768 格式，防止误用 X25519
+case "$DECRYPTION" in
+    mlkem768x25519plus.native.*)
+        ;;
+    *)
+        DECRYPTION=""
+        ;;
+esac
+
+case "$ENCRYPTION" in
+    mlkem768x25519plus.native.*)
+        ;;
+    *)
+        ENCRYPTION=""
+        ;;
+esac
+
+# 从 Xray 输出中的 ML-KEM-768 区块提取字段
 extract_mlkem_key() {
     KEY_NAME="$1"
 
-    printf '%s\n' "$VLESSENC_OUTPUT" |
-        awk -v key="$KEY_NAME" '
-            BEGIN {
-                IGNORECASE = 1
+    awk -v key="$KEY_NAME" '
+        /Authentication:[[:space:]]*ML-KEM-768,[[:space:]]*Post-Quantum/ {
+            in_mlkem=1
+            next
+        }
+
+        in_mlkem && /^Authentication:/ {
+            exit
+        }
+
+        in_mlkem && index($0, "\"" key "\"") {
+            line=$0
+
+            sub(".*\"" key "\"[[:space:]]*:[[:space:]]*\"", "", line)
+            sub("\".*", "", line)
+
+            if (line != "") {
+                print line
+                exit
             }
-
-            {
-                line = $0
-
-                if (line !~ key) {
-                    next
-                }
-
-                # JSON 格式：
-                # "decryption": "value"
-                # "encryption": "value"
-                if (line ~ key "[^:]*:[[:space:]]*") {
-                    sub("^[^" key "]*" key "[^:]*:[[:space:]]*", "", line)
-                } else {
-                    # 普通文本格式：
-                    # decryption value
-                    # encryption value
-                    sub("^[^" key "]*" key "[[:space:]]+", "", line)
-                }
-
-                # 去除引号、逗号、空格和 JSON 尾部字符
-                gsub(/^[ "'\''\t]+/, "", line)
-                gsub(/["'\'' ,}\t]+$/, "", line)
-
-                if (line != "") {
-                    print line
-                    exit
-                }
-            }
-        '
+        }
+    ' "$VLESSENC_FILE"
 }
 
-# 自动生成 ML-KEM 密钥
+# 强制轮换密钥
+if [ "$ROTATE_PQ_KEYS" = "true" ]; then
+    log "ROTATE_PQ_KEYS=true, existing ML-KEM keys will be replaced."
+
+    DECRYPTION=""
+    ENCRYPTION=""
+fi
+
+# 如果缺少任意一把密钥，则重新生成一整对
 if [ "$ENABLE_PQ" != "false" ] &&
     { [ -z "$DECRYPTION" ] || [ -z "$ENCRYPTION" ]; }; then
 
-    log "Generating VLESS ML-KEM keys..."
+    log "Generating VLESS ML-KEM-768 keys..."
 
-    VLESSENC_OUTPUT="$(
-        "$BIN_FILE" vlessenc 2>/dev/null || true
-    )"
+    VLESSENC_FILE="$TMP/vlessenc.txt"
+
+    # 某些版本的 Xray 输出到 stderr，因此同时捕获 stdout 和 stderr
+    "$BIN_FILE" vlessenc > "$VLESSENC_FILE" 2>&1 || true
 
     NEW_DECRYPTION="$(extract_mlkem_key decryption)"
     NEW_ENCRYPTION="$(extract_mlkem_key encryption)"
 
-    if [ -n "$NEW_DECRYPTION" ] &&
-        [ -n "$NEW_ENCRYPTION" ]; then
+    # 再次检查提取出的确实是 ML-KEM-768 密钥
+    case "$NEW_DECRYPTION" in
+        mlkem768x25519plus.native.*)
+            ;;
+        *)
+            NEW_DECRYPTION=""
+            ;;
+    esac
 
-        DECRYPTION="$NEW_DECRYPTION"
-        ENCRYPTION="$NEW_ENCRYPTION"
+    case "$NEW_ENCRYPTION" in
+        mlkem768x25519plus.native.*)
+            ;;
+        *)
+            NEW_ENCRYPTION=""
+            ;;
+    esac
 
-        # 纯文本保存，不使用 jq
-        printf '%s\n' "$DECRYPTION" > "$DECRYPTION_FILE"
-        printf '%s\n' "$ENCRYPTION" > "$ENCRYPTION_FILE"
+    if [ -z "$NEW_DECRYPTION" ] ||
+        [ -z "$NEW_ENCRYPTION" ]; then
 
-        chmod 600 \
-            "$DECRYPTION_FILE" \
-            "$ENCRYPTION_FILE"
-
-        log "ML-KEM keys saved."
-    else
-        log "Warning: ML-KEM keys were not generated."
+        log "Error: failed to generate ML-KEM-768 keys." >&2
+        cat "$VLESSENC_FILE" >&2
+        exit 1
     fi
+
+    DECRYPTION="$NEW_DECRYPTION"
+    ENCRYPTION="$NEW_ENCRYPTION"
+
+    printf '%s\n' "$DECRYPTION" > "$DECRYPTION_FILE"
+    printf '%s\n' "$ENCRYPTION" > "$ENCRYPTION_FILE"
+
+    chmod 600 \
+        "$DECRYPTION_FILE" \
+        "$ENCRYPTION_FILE"
+
+    log "ML-KEM-768 keys saved."
 fi
 
-if [ "$ENABLE_PQ" != "false" ] &&
-    [ -n "$DECRYPTION" ]; then
+# PQ 开启时，必须同时存在两把密钥
+if [ "$ENABLE_PQ" != "false" ]; then
+    if [ -z "$DECRYPTION" ] || [ -z "$ENCRYPTION" ]; then
+        log "Error: ML-KEM-768 keys are unavailable." >&2
+        exit 1
+    fi
+
     INBOUND_DECRYPTION="$DECRYPTION"
-else
-    INBOUND_DECRYPTION="none"
-fi
-
-if [ "$ENABLE_PQ" != "false" ] &&
-    [ -n "$ENCRYPTION" ]; then
     LINK_ENCRYPTION="$ENCRYPTION"
 else
+    INBOUND_DECRYPTION="none"
     LINK_ENCRYPTION=""
+fi
+
+# ------------------------------
+# 生成 Xray 配置
+# ------------------------------
+
+FLOW=""
+
+if [ "$ENABLE_PQ" != "false" ]; then
+    FLOW="xtls-rprx-vision"
 fi
 
 log "Generating Xray configuration..."
@@ -390,6 +443,10 @@ jq -n \
         ]
     }' > "$CONFIG_FILE"
 
+# ------------------------------
+# 下载静态页面
+# ------------------------------
+
 log "Downloading static page..."
 
 wget \
@@ -397,7 +454,10 @@ wget \
     -O "$PUBLIC_DIR/index.html" \
     "$INDEX_URL"
 
+# ------------------------------
 # 生成 lighttpd 配置
+# ------------------------------
+
 LIGHTTPD_CONF="$TMP/lighttpd.conf"
 
 cat > "$LIGHTTPD_CONF" <<EOF
@@ -428,6 +488,10 @@ mimetype.assign = (
 )
 EOF
 
+# ------------------------------
+# 启动 lighttpd
+# ------------------------------
+
 log "Starting lighttpd on 127.0.0.1:$STATIC_PORT..."
 
 lighttpd \
@@ -449,6 +513,10 @@ if ! kill -0 "$HTTP_PID" 2>/dev/null; then
     exit 1
 fi
 
+# ------------------------------
+# 启动 Xray
+# ------------------------------
+
 log "Starting Xray on port $PORT..."
 
 "$BIN_FILE" \
@@ -463,6 +531,10 @@ if ! kill -0 "$XRAY_PID" 2>/dev/null; then
     echo "Xray failed to start" >&2
     exit 1
 fi
+
+# ------------------------------
+# 生成 VLESS 链接
+# ------------------------------
 
 gen_vless_link() {
     HOST="$1"
@@ -533,12 +605,21 @@ if [ -n "$CUSTOM_DOMAIN" ]; then
             true)"
 fi
 
+# 链接文件包含 encryption 参数，限制为当前用户可读
+chmod 600 "$LINK_FILE"
+
+# 限制状态文件和配置文件权限
+chmod 600 "$STATE_FILE" "$CONFIG_FILE" 2>/dev/null || true
+
 log "Initialized successfully."
 log "Links saved to: $LINK_FILE"
 log "Xray PID: $XRAY_PID"
 log "lighttpd PID: $HTTP_PID"
 
+# ------------------------------
 # 保持容器运行
+# ------------------------------
+
 while :; do
     sleep 3600
 
