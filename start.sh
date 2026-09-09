@@ -1,386 +1,362 @@
-const fs = require("fs/promises");
-const { createWriteStream } = require("fs");
-const { createServer } = require("http");
-const path = require("path");
-const { spawn } = require("child_process");
-const crypto = require("crypto");
-const util = require("util");
-const { pipeline } = require("stream/promises");
-const execAsync = util.promisify(require("child_process").exec);
-const CONFIG = {
-  PORT: parseInt(process.env.SERVER_PORT || process.env.PORT || 3000, 10),
-  UUID: process.env.UUID || "",
-  LINK_NAME: process.env.LINK_NAME || "Node",
-  CDN_HOST: process.env.CDN_HOST || "www.visa.com.sg",
-  SERVER_IP: process.env.SERVER_IP || "127.0.0.1",
-  XRAY_URL:
-    "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip",
-  ENABLE_XRAY: process.env.ENABLE_XRAY !== "false",
-  ENABLE_PQ: process.env.ENABLE_PQ !== "false",
-  CUSTOM_DOMAIN: process.env.CUSTOM_DOMAIN || "www.visa.com.sg",
-  PERSIST_FILE: path.join(__dirname, ".sys_data"),
-};
-const INDEX_URL =
-  "https://gist.githubusercontent.com/good-xuan/c746ede2162561742591de5ef18ed280/raw/67d07ca6f813c8b616f71a68be491b561244d771/sjtp.html";
-CONFIG.FLOW = CONFIG.ENABLE_PQ ? "xtls-rprx-vision" : "";
-const randomStr = () => crypto.randomBytes(4).toString("hex");
-const TMP = path.join(__dirname, "tmp");
-const STATIC_PORT = CONFIG.PORT + 2;
-const STATIC_ROOT = path.join(__dirname, "public");
-const FILES = {
-  BIN: path.join(TMP, randomStr()),
-  ZIP: path.join(TMP, `${randomStr()}.zip`),
-  CFG: path.join(TMP, "config.json"),
-  LINKS: path.join(__dirname, "LINK.txt"),
-};
-const exists = async (targetPath) => {
-  return fs
-    .access(targetPath)
-    .then(() => true)
-    .catch(() => false);
-};
-const download = async (url, destination) => {
-  const response = await fetch(url);
-  if (!response.ok || !response.body) {
-    throw new Error(
-      `Download failed: ${response.status} ${response.statusText}`,
-    );
-  }
-  await pipeline(response.body, createWriteStream(destination));
-};
-const MIME_TYPES = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".txt": "text/plain; charset=utf-8",
-  ".xml": "application/xml; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".webp": "image/webp",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-};
-const startStaticServer = async () => {
-  await fs.mkdir(STATIC_ROOT, {
-    recursive: true,
-  });
-  const server = createServer(async (req, res) => {
-    try {
-      let requestPath = decodeURIComponent(
-        new URL(req.url || "/", "http://127.0.0.1").pathname,
-      );
-      if (requestPath === "/") {
-        requestPath = "/index.html";
-      }
-      const rootPath = path.resolve(STATIC_ROOT);
-      const filePath = path.resolve(STATIC_ROOT, `.${requestPath}`);
-      if (filePath !== rootPath && !filePath.startsWith(rootPath + path.sep)) {
-        res.writeHead(403, {
-          "Content-Type": "text/plain; charset=utf-8",
-        });
-        return res.end("Forbidden");
-      }
-      const stat = await fs.stat(filePath);
-      if (!stat.isFile()) {
-        res.writeHead(404, {
-          "Content-Type": "text/plain; charset=utf-8",
-        });
-        return res.end("Not Found");
-      }
-      const ext = path.extname(filePath).toLowerCase();
-      const contentType = MIME_TYPES[ext] || "application/octet-stream";
-      const fileData = await fs.readFile(filePath);
-      res.writeHead(200, {
-        "Content-Type": contentType,
-        "Content-Length": fileData.length,
-        "Cache-Control": "no-cache",
-      });
-      res.end(fileData);
-    } catch (error) {
-      res.writeHead(404, {
-        "Content-Type": "text/plain; charset=utf-8",
-      });
-      res.end("Not Found");
-    }
-  });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(STATIC_PORT, "127.0.0.1", () => {
-      resolve();
-    });
-  });
-};
-const State = {
-  async load() {
-    if (await exists(CONFIG.PERSIST_FILE)) {
-      try {
-        return JSON.parse(await fs.readFile(CONFIG.PERSIST_FILE, "utf-8"));
-      } catch {
-        return {};
-      }
-    }
-    return {};
-  },
-  async save(data) {
-    const current = await this.load();
-    await fs.writeFile(
-      CONFIG.PERSIST_FILE,
-      JSON.stringify(
-        {
-          ...current,
-          ...data,
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-  },
-};
-(async () => {
-  if (await exists(FILES.LINKS)) {
-    await fs.unlink(FILES.LINKS).catch(() => {});
-  }
-  if (await exists(TMP)) {
-    await fs
-      .rm(TMP, {
-        recursive: true,
-        force: true,
-      })
-      .catch(() => {});
-  }
-  await fs.mkdir(TMP, {
-    recursive: true,
-  });
-  try {
-    const state = await State.load();
-    const uuid = CONFIG.UUID || state.uuid || crypto.randomUUID();
-    const xhttpPath =
-      process.env.XHTTP_PATH || state.xhttp || `/${randomStr()}`;
-    await State.save({
-      uuid,
-      xhttp: xhttpPath,
-    });
-    let keys = state.keys || {
-      decryption: process.env.VLESS_DECRYPTION || "",
-      encryption: process.env.VLESS_ENCRYPTION || "",
-    };
-    const genVlessLink = (host, port, remarks, isDomainLink) => {
-      const link = new URL(
-        `vless://${uuid}@${
-          isDomainLink ? CONFIG.CDN_HOST : host
-        }:${isDomainLink ? 443 : port}`,
-      );
-      const params = link.searchParams;
-      params.set("security", "tls");
-      if (CONFIG.ENABLE_PQ && keys.encryption) {
-        params.set("encryption", keys.encryption);
-      }
-      if (CONFIG.FLOW) {
-        params.set("flow", CONFIG.FLOW);
-      }
-      params.set("sni", isDomainLink ? host : CONFIG.CDN_HOST);
-      params.set("fp", "random");
-      params.set("alpn", "h2");
-      params.set("type", "xhttp");
-      params.set("path", xhttpPath);
-      link.hash = remarks;
-      return link.toString();
-    };
-    const saveLink = async (content, title = "") => {
-      await fs
-        .appendFile(FILES.LINKS, `\n${title}\n${content}\n`, "utf8")
-        .catch(() => {});
-    };
-    if (CONFIG.ENABLE_XRAY) {
-      await download(CONFIG.XRAY_URL, FILES.ZIP);
-      await execAsync(`unzip -o "${FILES.ZIP}" -d "${TMP}"`);
-      const { stdout: findOut } = await execAsync(
-        `find "${TMP}" -type f -name "xray" | head -n 1`,
-      );
-      const xraySource = findOut.trim();
-      if (!xraySource) {
-        throw new Error("Xray binary not found");
-      }
-      await fs.rename(xraySource, FILES.BIN);
-      await fs.chmod(FILES.BIN, 0o755);
-      let certArray = [];
-      let keyArray = [];
-      if (state.cert && state.key) {
-        certArray = state.cert.split("\n");
-        keyArray = state.key.split("\n");
-      } else {
-        try {
-          const { stdout } = await execAsync(`"${FILES.BIN}" tls cert`, {
-            encoding: "utf8",
-          });
-          const certData = JSON.parse(stdout);
-          certArray = certData.certificate || [];
-          keyArray = certData.key || [];
-          await State.save({
-            cert: certArray.join("\n"),
-            key: keyArray.join("\n"),
-          });
-        } catch {}
-      }
-      if (CONFIG.ENABLE_PQ && (!keys.decryption || !keys.encryption)) {
-        try {
-          const { stdout } = await execAsync(`"${FILES.BIN}" vlessenc`, {
-            encoding: "utf8",
-          });
-          const match = stdout.match(
-            /ML-KEM-768[\s\S]+?"decryption":\s*"([^"]+)"[\s\S]+?"encryption":\s*"([^"]+)"/,
-          );
-          if (match) {
-            keys = {
-              decryption: match[1],
-              encryption: match[2],
-            };
-            await State.save({
-              keys,
-            });
-          }
-        } catch {}
-      }
-      const xrayConfig = {
-        log: {
-          loglevel: "none",
-        },
-        inbounds: [
-          {
-            port: CONFIG.PORT,
-            protocol: "vless",
-            settings: {
-              fallbacks: [
-                {
-                  dest: CONFIG.PORT + 1,
-                },
-                {
-                  path: "/",
-                  dest: STATIC_PORT,
-                },
-              ],
-              decryption: "none",
-            },
+#!/bin/sh
+
+set -eu
+
+BASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+TMP="$BASE_DIR/tmp"
+PUBLIC_DIR="$BASE_DIR/public"
+STATE_FILE="$BASE_DIR/.sys_data"
+LINK_FILE="$BASE_DIR/LINK.txt"
+CONFIG_FILE="$TMP/config.json"
+ZIP_FILE="$TMP/xray.zip"
+BIN_FILE="$TMP/xray"
+
+PORT="${SERVER_PORT:-${PORT:-3000}}"
+UUID="${UUID:-}"
+LINK_NAME="${LINK_NAME:-Node}"
+CDN_HOST="${CDN_HOST:-www.visa.com.sg}"
+SERVER_IP="${SERVER_IP:-127.0.0.1}"
+CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-www.visa.com.sg}"
+ENABLE_XRAY="${ENABLE_XRAY:-true}"
+ENABLE_PQ="${ENABLE_PQ:-true}"
+
+XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+INDEX_URL="https://gist.githubusercontent.com/good-xuan/c746ede2162561742591de5ef18ed280/raw/67d07ca6f813c8b616f71a68be491b561244d771/sjtp.html"
+
+STATIC_PORT=$((PORT + 2))
+FALLBACK_PORT=$((PORT + 1))
+
+random_hex() {
+    od -An -N4 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+urlencode() {
+    printf '%s' "$1" | jq -sRr @uri
+}
+
+log() {
+    printf '%s\n' "$*"
+}
+
+cleanup() {
+    if [ -n "${XRAY_PID:-}" ] && kill -0 "$XRAY_PID" 2>/dev/null; then
+        kill "$XRAY_PID" 2>/dev/null || true
+    fi
+
+    if [ -n "${HTTP_PID:-}" ] && kill -0 "$HTTP_PID" 2>/dev/null; then
+        kill "$HTTP_PID" 2>/dev/null || true
+    fi
+}
+
+trap cleanup INT TERM EXIT
+
+mkdir -p "$TMP" "$PUBLIC_DIR"
+
+rm -f "$LINK_FILE"
+rm -rf "$TMP"
+mkdir -p "$TMP"
+
+if [ -f "$STATE_FILE" ] && jq empty "$STATE_FILE" >/dev/null 2>&1; then
+    STATE="$(cat "$STATE_FILE")"
+else
+    STATE='{}'
+fi
+
+if [ -z "$UUID" ]; then
+    UUID="$(printf '%s' "$STATE" | jq -r '.uuid // empty')"
+fi
+
+if [ -z "$UUID" ]; then
+    UUID="$(cat /proc/sys/kernel/random/uuid)"
+fi
+
+XHTTP_PATH="${XHTTP_PATH:-}"
+if [ -z "$XHTTP_PATH" ]; then
+    XHTTP_PATH="$(printf '%s' "$STATE" | jq -r '.xhttp // empty')"
+fi
+
+if [ -z "$XHTTP_PATH" ]; then
+    XHTTP_PATH="/$(random_hex)"
+fi
+
+save_state() {
+    jq \
+        --arg uuid "$UUID" \
+        --arg xhttp "$XHTTP_PATH" \
+        '. + {uuid: $uuid, xhttp: $xhttp}' \
+        "$STATE_FILE" 2>/dev/null > "$STATE_FILE.tmp" || \
+        printf '{"uuid":"%s","xhttp":"%s"}\n' "$UUID" "$XHTTP_PATH" > "$STATE_FILE.tmp"
+
+    mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+save_state
+
+# 读取已保存的 ML-KEM 密钥
+DECRYPTION=""
+ENCRYPTION=""
+
+if [ -f "$STATE_FILE" ]; then
+    DECRYPTION="$(jq -r '.keys.decryption // empty' "$STATE_FILE" 2>/dev/null || true)"
+    ENCRYPTION="$(jq -r '.keys.encryption // empty' "$STATE_FILE" 2>/dev/null || true)"
+fi
+
+if [ -n "${VLESS_DECRYPTION:-}" ]; then
+    DECRYPTION="$VLESS_DECRYPTION"
+fi
+
+if [ -n "${VLESS_ENCRYPTION:-}" ]; then
+    ENCRYPTION="$VLESS_ENCRYPTION"
+fi
+
+FLOW=""
+if [ "$ENABLE_PQ" != "false" ]; then
+    FLOW="xtls-rprx-vision"
+fi
+
+if [ "$ENABLE_XRAY" != "false" ]; then
+    log "Downloading Xray..."
+
+    wget -q --show-progress \
+        -O "$ZIP_FILE" \
+        "$XRAY_URL"
+
+    unzip -oq "$ZIP_FILE" -d "$TMP"
+
+    XRAY_SOURCE="$(find "$TMP" -type f -name xray | head -n 1)"
+
+    if [ -z "$XRAY_SOURCE" ]; then
+        echo "Xray binary not found" >&2
+        exit 1
+    fi
+
+    mv "$XRAY_SOURCE" "$BIN_FILE"
+    chmod 755 "$BIN_FILE"
+
+    # 自动生成 ML-KEM 密钥
+    if [ "$ENABLE_PQ" != "false" ] &&
+        { [ -z "$DECRYPTION" ] || [ -z "$ENCRYPTION" ]; }; then
+
+        VLESSENC_OUTPUT="$("$BIN_FILE" vlessenc 2>/dev/null || true)"
+
+        NEW_DECRYPTION="$(printf '%s' "$VLESSENC_OUTPUT" |
+            sed -n 's/.*"decryption"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+            head -n 1)"
+
+        NEW_ENCRYPTION="$(printf '%s' "$VLESSENC_OUTPUT" |
+            sed -n 's/.*"encryption"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+            head -n 1)"
+
+        if [ -n "$NEW_DECRYPTION" ] && [ -n "$NEW_ENCRYPTION" ]; then
+            DECRYPTION="$NEW_DECRYPTION"
+            ENCRYPTION="$NEW_ENCRYPTION"
+
+            jq \
+                --arg decryption "$DECRYPTION" \
+                --arg encryption "$ENCRYPTION" \
+                '. + {keys: {decryption: $decryption, encryption: $encryption}}' \
+                "$STATE_FILE" > "$STATE_FILE.tmp"
+
+            mv "$STATE_FILE.tmp" "$STATE_FILE"
+        fi
+    fi
+
+    if [ "$ENABLE_PQ" != "false" ] && [ -n "$DECRYPTION" ]; then
+        INBOUND_DECRYPTION="$DECRYPTION"
+    else
+        INBOUND_DECRYPTION="none"
+    fi
+
+    if [ "$ENABLE_PQ" != "false" ] && [ -n "$ENCRYPTION" ]; then
+        LINK_ENCRYPTION="$ENCRYPTION"
+    else
+        LINK_ENCRYPTION=""
+    fi
+
+    # 生成 Xray 配置
+    jq -n \
+        --argjson port "$PORT" \
+        --argjson fallback_port "$FALLBACK_PORT" \
+        --argjson static_port "$STATIC_PORT" \
+        --arg uuid "$UUID" \
+        --arg flow "$FLOW" \
+        --arg xhttp_path "$XHTTP_PATH" \
+        --arg decryption "$INBOUND_DECRYPTION" \
+        '{
+          log: {
+            loglevel: "none"
           },
-          {
-            port: CONFIG.PORT + 1,
-            protocol: "vless",
-            settings: {
-              clients: [
-                {
-                  id: uuid,
-                  flow: CONFIG.FLOW,
-                },
-              ],
-              decryption:
-                CONFIG.ENABLE_PQ && keys.decryption ? keys.decryption : "none",
-            },
-            streamSettings: {
-              sockopt: {
-                trustedXForwardedFor: ["CF-Connecting-IP", "X-Real-IP"],
-                tcpcongestion: "bbr",
-              },
-              network: "xhttp",
-              xhttpSettings: {
-                path: xhttpPath,
-              },
-            },
-          },
-        ],
-        dns: {
-          servers: ["https+local://1.1.1.1/dns-query", "localhost"],
-        },
-        outbounds: [
-          {
-            protocol: "freedom",
-            tag: "direct",
-            streamSettings: {
-              finalmask: {
-                tcp: [
+          inbounds: [
+            {
+              port: $port,
+              protocol: "vless",
+              settings: {
+                fallbacks: [
                   {
-                    type: "fragment",
-                    settings: {
-                      packets: "tlshello",
-                      length: "100-200",
-                      delay: "10-20",
-                      maxSplit: "3-6",
-                    },
+                    dest: $fallback_port
                   },
+                  {
+                    path: "/",
+                    dest: $static_port
+                  }
                 ],
-              },
-              sockopt: {
-                tcpcongestion: "bbr",
-                domainStrategy: "UseIP",
-                happyEyeballs: {
-                  tryDelayMs: 250,
-                },
-              },
+                decryption: "none"
+              }
             },
+            {
+              port: $fallback_port,
+              protocol: "vless",
+              settings: {
+                clients: [
+                  {
+                    id: $uuid,
+                    flow: $flow
+                  }
+                ],
+                decryption: $decryption
+              },
+              streamSettings: {
+                sockopt: {
+                  trustedXForwardedFor: [
+                    "CF-Connecting-IP",
+                    "X-Real-IP"
+                  ],
+                  tcpcongestion: "bbr"
+                },
+                network: "xhttp",
+                xhttpSettings: {
+                  path: $xhttp_path
+                }
+              }
+            }
+          ],
+          dns: {
+            servers: [
+              "https+local://1.1.1.1/dns-query",
+              "localhost"
+            ]
           },
-          {
-            protocol: "blackhole",
-            tag: "block",
-          },
-        ],
-      };
-      await fs.writeFile(FILES.CFG, JSON.stringify(xrayConfig), "utf8");
-      await fs.mkdir(STATIC_ROOT, {
-        recursive: true,
-      });
-      await download(INDEX_URL, path.join(STATIC_ROOT, "index.html"));
-      await startStaticServer();
-      const xrayProcess = spawn(FILES.BIN, ["-c", FILES.CFG], {
-        stdio: "ignore",
-        env: process.env,
-      });
-      xrayProcess.on("error", (error) => {
-        console.error("Xray process error:", error);
-        process.exit(1);
-      });
-      xrayProcess.on("exit", (code) => {
-        console.error(`Xray exited with code: ${code}`);
-        process.exit(1);
-      });
-      if (CONFIG.SERVER_IP) {
-        await saveLink(
-          genVlessLink(
-            CONFIG.SERVER_IP,
-            CONFIG.PORT,
-            `${CONFIG.LINK_NAME}-Direct`,
-            false,
-          ),
-          "Direct IP",
-        );
-      }
-      if (CONFIG.CUSTOM_DOMAIN) {
-        await saveLink(
-          genVlessLink(CONFIG.CUSTOM_DOMAIN, 443, CONFIG.LINK_NAME, true),
-          "Custom Domain",
-        );
-      }
+          outbounds: [
+            {
+              protocol: "freedom",
+              tag: "direct",
+              streamSettings: {
+                finalmask: {
+                  tcp: [
+                    {
+                      type: "fragment",
+                      settings: {
+                        packets: "tlshello",
+                        length: "100-200",
+                        delay: "10-20",
+                        maxSplit: "3-6"
+                      }
+                    }
+                  ]
+                },
+                sockopt: {
+                  tcpcongestion: "bbr",
+                  domainStrategy: "UseIP",
+                  happyEyeballs: {
+                    tryDelayMs: 250
+                  }
+                }
+              }
+            },
+            {
+              protocol: "blackhole",
+              tag: "block"
+            }
+          ]
+        }' > "$CONFIG_FILE"
+
+    wget -q -O "$PUBLIC_DIR/index.html" "$INDEX_URL"
+
+    # Alpine 自带 BusyBox httpd
+    busybox httpd \
+        -f \
+        -p "127.0.0.1:$STATIC_PORT" \
+        -h "$PUBLIC_DIR" &
+    HTTP_PID=$!
+
+    "$BIN_FILE" -c "$CONFIG_FILE" >/dev/null 2>&1 &
+    XRAY_PID=$!
+
+    sleep 1
+
+    if ! kill -0 "$XRAY_PID" 2>/dev/null; then
+        echo "Xray failed to start" >&2
+        exit 1
+    fi
+
+    gen_vless_link() {
+        HOST="$1"
+        LINK_PORT="$2"
+        REMARK="$3"
+        DOMAIN_LINK="$4"
+
+        if [ "$DOMAIN_LINK" = "true" ]; then
+            LINK_HOST="$CDN_HOST"
+            LINK_PORT="443"
+            SNI="$HOST"
+        else
+            LINK_HOST="$HOST"
+            SNI="$CDN_HOST"
+        fi
+
+        ENCODED_PATH="$(urlencode "$XHTTP_PATH")"
+        ENCODED_REMARK="$(urlencode "$REMARK")"
+
+        LINK="vless://${UUID}@${LINK_HOST}:${LINK_PORT}"
+        LINK="${LINK}?security=tls"
+
+        if [ -n "$LINK_ENCRYPTION" ]; then
+            LINK="${LINK}&encryption=$(urlencode "$LINK_ENCRYPTION")"
+        fi
+
+        if [ -n "$FLOW" ]; then
+            LINK="${LINK}&flow=$(urlencode "$FLOW")"
+        fi
+
+        LINK="${LINK}&sni=$(urlencode "$SNI")"
+        LINK="${LINK}&fp=random"
+        LINK="${LINK}&alpn=h2"
+        LINK="${LINK}&type=xhttp"
+        LINK="${LINK}&path=${ENCODED_PATH}"
+        LINK="${LINK}#${ENCODED_REMARK}"
+
+        printf '%s\n' "$LINK"
     }
-    console.log("✅ Initialized successfully.");
-  } catch (error) {
-    console.error("❌ Initialization failed:", error);
-    process.exit(1);
-  }
-  setTimeout(async () => {
-    if (await exists(TMP)) {
-      await fs
-        .rm(TMP, {
-          recursive: true,
-          force: true,
-        })
-        .catch(() => {});
+
+    save_link() {
+        TITLE="$1"
+        CONTENT="$2"
+
+        {
+            printf '\n%s\n%s\n' "$TITLE" "$CONTENT"
+        } >> "$LINK_FILE"
     }
-  }, 20000);
-  setInterval(() => {
-    console.log("💓 Heartbeat", new Date().toISOString());
-  }, 3600000);
-})();
+
+    if [ -n "$SERVER_IP" ]; then
+        save_link \
+            "Direct IP" \
+            "$(gen_vless_link "$SERVER_IP" "$PORT" "${LINK_NAME}-Direct" false)"
+    fi
+
+    if [ -n "$CUSTOM_DOMAIN" ]; then
+        save_link \
+            "Custom Domain" \
+            "$(gen_vless_link "$CUSTOM_DOMAIN" 443 "$LINK_NAME" true)"
+    fi
+
+    log "Initialized successfully."
+    log "Links saved to: $LINK_FILE"
+else
+    log "ENABLE_XRAY=false, Xray was not started."
+fi
+
+# 保持主进程运行，并输出心跳
+while :; do
+    sleep 3600
+    printf '💓 Heartbeat %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+done
