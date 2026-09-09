@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        default: "ssl"
+        default: "notls"
 
 env:
   REGISTRY: ghcr.io
