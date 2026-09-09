@@ -7,6 +7,7 @@ RUN apk add --no-cache \
         jq \
         gcompat \
         libstdc++ \
+        busybox-httpd \
     && update-ca-certificates
 
 WORKDIR /app
