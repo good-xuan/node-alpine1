@@ -145,7 +145,6 @@ log "Downloading Xray..."
 
 wget \
     -q \
-    --show-progress \
     -O "$ZIP_FILE" \
     "$XRAY_URL"
 
