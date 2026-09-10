@@ -163,7 +163,10 @@ if [ -z "$XRAY_SOURCE" ]; then
     exit 1
 fi
 
-mv "$XRAY_SOURCE" "$BIN_FILE"
+
+if [ "$XRAY_SOURCE" != "$BIN_FILE" ]; then
+    mv "$XRAY_SOURCE" "$BIN_FILE"
+fi
 chmod 755 "$BIN_FILE"
 
 # ------------------------------
