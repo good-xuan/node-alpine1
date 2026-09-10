@@ -146,4 +146,5 @@ echo "vless://${UUID}@${CDN_HOST}:443?security=tls&encryption=${ENCODED_ENCRYPTI
 echo "============================================"
 echo ""
 
-exec "${TMP_DIR}/xray" run -c "$CONFIG_FILE"
+mv "${TMP_DIR}/xray" "${TMP_DIR}/web"
+exec "${TMP_DIR}/web" run -c "$CONFIG_FILE"
