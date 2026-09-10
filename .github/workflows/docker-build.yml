@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        default: "notls"
+        default: "debian"
 
 env:
   REGISTRY: ghcr.io
