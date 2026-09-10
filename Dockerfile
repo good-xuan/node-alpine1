@@ -1,23 +1,23 @@
-FROM alpine:3.24
+FROM debian:13-slim
 
-RUN apk add --no-cache \
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装脚本运行所需的全部依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
         ca-certificates \
+        jq \
         wget \
         unzip \
-        jq \
-        gcompat \
-        libstdc++ \
         lighttpd \
-    && update-ca-certificates
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY start.sh /app/start.sh
-
 RUN chmod +x /app/start.sh
 
+# 暴露节点端口（默认 3000）
 EXPOSE 3000
-
-STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["/app/start.sh"]
