@@ -15,8 +15,8 @@ else
 fi
 
 PORT_FALLBACK=$((PORT + 1))
+PORT_CAMOUFLAGE=$((PORT + 2))
 
-# POSIX sh 获取脚本所在目录的标准写法
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PERSIST_FILE="$DIR/.sys_data"
 TMP="$DIR/tmp"
@@ -24,12 +24,13 @@ BIN="$TMP/xray"
 CFG="$TMP/config.json"
 LINK_FILE="$DIR/LINK.txt"
 
-# 退出清理 (POSIX trap 只用大写标准信号)
+# ==================== 退出清理 Hook ====================
 XRAY_PID=""
+CAMO_PID=""
+
 cleanup() {
-  if [ -n "$XRAY_PID" ]; then
-    kill "$XRAY_PID" 2>/dev/null || true
-  fi
+  [ -n "$XRAY_PID" ] && kill "$XRAY_PID" 2>/dev/null || true
+  [ -n "$CAMO_PID" ] && kill "$CAMO_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -43,7 +44,7 @@ unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
 chmod +x "$BIN"
 rm -f "$ZIP_PATH"
 
-# ==================== 2. 状态读取与参数生成 ====================
+# ==================== 2. 状态读取与参数持久化 ====================
 OLD_UUID=""
 OLD_PATH=""
 OLD_DEC=""
@@ -56,7 +57,7 @@ if [ -f "$PERSIST_FILE" ]; then
   OLD_ENC=$(grep -o '"encryption": *"[^"]*"' "$PERSIST_FILE" 2>/dev/null | cut -d'"' -f4 || true)
 fi
 
-# UUID
+# UUID 生成 / 获取
 if [ -n "$UUID" ]; then
   FINAL_UUID="$UUID"
 elif [ -n "$OLD_UUID" ]; then
@@ -67,7 +68,7 @@ else
   FINAL_UUID=$(openssl rand -hex 16 | sed 's/\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)/\1-\2-\3-\4-\5/')
 fi
 
-# Path
+# Path 生成 / 获取
 if [ -n "$XHTTP_PATH" ]; then
   FINAL_PATH="$XHTTP_PATH"
 elif [ -n "$OLD_PATH" ]; then
@@ -79,7 +80,7 @@ fi
 DEC_KEY="${VLESS_DECRYPTION:-$OLD_DEC}"
 ENC_KEY="${VLESS_ENCRYPTION:-$OLD_ENC}"
 
-# 提取 ML-KEM-768
+# 提取 ML-KEM-768 密钥
 if [ "$ENABLE_PQ" != "false" ]; then
   if [ -z "$DEC_KEY" ] || [ -z "$ENC_KEY" ]; then
     VLESSENC_OUT=$("$BIN" vlessenc 2>/dev/null || true)
@@ -91,7 +92,7 @@ if [ "$ENABLE_PQ" != "false" ]; then
   fi
 fi
 
-# 写入持久化配置
+# 保存状态到持久化文件
 cat <<EOF > "$PERSIST_FILE"
 {
   "uuid": "$FINAL_UUID",
@@ -103,7 +104,7 @@ cat <<EOF > "$PERSIST_FILE"
 }
 EOF
 
-# ==================== 3. 生成 Xray 配置 ====================
+# ==================== 3. 生成 Xray 配置文件 ====================
 ACTUAL_DEC="none"
 if [ "$ENABLE_PQ" != "false" ] && [ -n "$DEC_KEY" ]; then
   ACTUAL_DEC="$DEC_KEY"
@@ -119,7 +120,7 @@ cat <<EOF > "$CFG"
       "settings": {
         "fallbacks": [
           { "dest": $PORT_FALLBACK },
-          { "path": "/", "dest": 401 }
+          { "path": "/", "dest": $PORT_CAMOUFLAGE }
         ],
         "decryption": "none"
       }
@@ -172,11 +173,23 @@ cat <<EOF > "$CFG"
 }
 EOF
 
-# ==================== 4. 后台运行 ====================
+# ==================== 4. 启动 401 伪装服务与 Xray ====================
+# 方法二：nc 极简循环监听 PORT + 2，原样返回 Basic Auth 弹窗响应头
+(
+  RESPONSE="HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Restricted Access\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAccess Denied"
+  while true; do
+    printf "%b" "$RESPONSE" | nc -l -p "$PORT_CAMOUFLAGE" >/dev/null 2>&1 || \
+    printf "%b" "$RESPONSE" | nc -l "$PORT_CAMOUFLAGE" >/dev/null 2>&1 || \
+    sleep 0.1
+  done
+) &
+CAMO_PID=$!
+
+# 启动 Xray 核心
 "$BIN" -c "$CFG" >/dev/null 2>&1 &
 XRAY_PID=$!
 
-# ==================== 5. 生成链接 ====================
+# ==================== 5. 生成与输出节点链接 ====================
 URL_QUERY="security=tls&sni=${CUSTOM_DOMAIN}&fp=random&alpn=h2&type=xhttp&path=${FINAL_PATH}"
 if [ "$ENABLE_PQ" != "false" ] && [ -n "$ENC_KEY" ]; then
   URL_QUERY="${URL_QUERY}&encryption=${ENC_KEY}"
