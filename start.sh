@@ -1,134 +1,192 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -e
 
-BASE_DIR="$(pwd)"
-TMP_DIR="${BASE_DIR}/tmp"
-STATE_FILE="${BASE_DIR}/.sys_data"
-CONFIG_FILE="${TMP_DIR}/config.json"
-
-rm -rf "$TMP_DIR" && mkdir -p "$TMP_DIR"
-[ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
-
-# 1. 基础参数与 UUID / Path 读取
+# ==================== 环境变量与默认值 ====================
 PORT="${SERVER_PORT:-${PORT:-3000}}"
-FLOW="xtls-rprx-vision"
+LINK_NAME="${LINK_NAME:-Node}"
 CDN_HOST="${CDN_HOST:-www.visa.com.sg}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-www.visa.com.sg}"
-LINK_NAME="${LINK_NAME:-Node}"
+ENABLE_PQ="${ENABLE_PQ:-true}"
 
-UUID="${UUID:-$(jq -r '.uuid // empty' "$STATE_FILE")}"
-[ -z "$UUID" ] && UUID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || od -x /dev/urandom | head -1 | awk '{OFS="-"; print $2$3,$4,$5,$6,$7$8$9}')"
-
-XHTTP_PATH="${XHTTP_PATH:-$(jq -r '.xhttp // empty' "$STATE_FILE")}"
-[ -z "$XHTTP_PATH" ] && XHTTP_PATH="/$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-
-# 2. 下载 Xray
-wget -qO "${TMP_DIR}/x.zip" "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-unzip -oq "${TMP_DIR}/x.zip" -d "$TMP_DIR"
-chmod 755 "${TMP_DIR}/xray"
-
-# 3. 读取或生成 ML-KEM-768 密钥
-DECRYPTION="${VLESS_DECRYPTION:-$(jq -r '.decryption // empty' "$STATE_FILE")}"
-ENCRYPTION="${VLESS_ENCRYPTION:-$(jq -r '.encryption // empty' "$STATE_FILE")}"
-
-if [ -z "$DECRYPTION" ] || [ -z "$ENCRYPTION" ]; then
-    "${TMP_DIR}/xray" vlessenc > "${TMP_DIR}/enc.txt" 2>&1 || true
-    DECRYPTION=$(awk '/Authentication:[[:space:]]*ML-KEM-768/{flag=1;next}/^Authentication:/{flag=0}flag && /"decryption"/{gsub(/.*:[[:space:]]*"|"[[:space:]]*,?/,"");print;exit}' "${TMP_DIR}/enc.txt")
-    ENCRYPTION=$(awk '/Authentication:[[:space:]]*ML-KEM-768/{flag=1;next}/^Authentication:/{flag=0}flag && /"encryption"/{gsub(/.*:[[:space:]]*"|"[[:space:]]*,?/,"");print;exit}' "${TMP_DIR}/enc.txt")
+if [ "$ENABLE_PQ" != "false" ]; then
+  FLOW="xtls-rprx-vision"
+else
+  FLOW=""
 fi
 
-# 4. 读取或生成 TLS 证书 JSON 对象并存入 .sys_data
-TLS_CERT_JSON="$(jq -c '.tls_cert // empty' "$STATE_FILE")"
+PORT_FALLBACK=$((PORT + 1))
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PERSIST_FILE="$DIR/.sys_data"
+TMP="$DIR/tmp"
+BIN="$TMP/xray"
+CFG="$TMP/config.json"
+LINK_FILE="$DIR/LINK.txt"
 
-if [ -z "$TLS_CERT_JSON" ]; then
-    # 直接由 xray 输出 JSON 格式证书
-    TLS_CERT_JSON="$("${TMP_DIR}/xray" tls cert -domain "$CUSTOM_DOMAIN")"
+# 退出清理
+XRAY_PID=""
+cleanup() {
+  [ -n "$XRAY_PID" ] && kill "$XRAY_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# ==================== 1. 下载解压 Xray ====================
+mkdir -p "$TMP"
+ZIP_PATH="$TMP/x.zip"
+
+echo "Downloading Xray..."
+curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
+unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
+chmod +x "$BIN"
+rm -f "$ZIP_PATH"
+
+# ==================== 2. 状态读取与参数生成 (纯 Shell) ====================
+# 读取历史数据
+OLD_UUID=""
+OLD_PATH=""
+OLD_DEC=""
+OLD_ENC=""
+
+if [ -f "$PERSIST_FILE" ]; then
+  OLD_UUID=$(grep -o '"uuid": *"[^"]*"' "$PERSIST_FILE" | cut -d'"' -f4 || true)
+  OLD_PATH=$(grep -o '"xhttp": *"[^"]*"' "$PERSIST_FILE" | cut -d'"' -f4 || true)
+  OLD_DEC=$(grep -o '"decryption": *"[^"]*"' "$PERSIST_FILE" | cut -d'"' -f4 || true)
+  OLD_ENC=$(grep -o '"encryption": *"[^"]*"' "$PERSIST_FILE" | cut -d'"' -f4 || true)
 fi
 
-# 持久化所有参数及证书 JSON 到 .sys_data
-jq --arg u "$UUID" \
-   --arg p "$XHTTP_PATH" \
-   --arg dec "$DECRYPTION" \
-   --arg enc "$ENCRYPTION" \
-   --argjson cert "$TLS_CERT_JSON" \
-   '.uuid = $u | .xhttp = $p | .decryption = $dec | .encryption = $enc | .tls_cert = $cert' \
-   "$STATE_FILE" > "${STATE_FILE}.tmp"
-mv -f "${STATE_FILE}.tmp" "$STATE_FILE"
+# UUID 优先顺序: 环境变量 > .sys_data > 系统随机生成
+if [ -n "$UUID" ]; then
+  FINAL_UUID="$UUID"
+elif [ -n "$OLD_UUID" ]; then
+  FINAL_UUID="$OLD_UUID"
+elif [ -f /proc/sys/kernel/random/uuid ]; then
+  FINAL_UUID=$(cat /proc/sys/kernel/random/uuid)
+else
+  FINAL_UUID=$(openssl rand -hex 16 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')
+fi
 
-# 5. 生成单入站 TLS 配置
-jq -n \
-    --argjson port "$PORT" \
-    --argjson cert "$TLS_CERT_JSON" \
-    --arg uuid "$UUID" \
-    --arg flow "$FLOW" \
-    --arg xhttp_path "$XHTTP_PATH" \
-    --arg decryption "$DECRYPTION" \
-    '{
-        log: { loglevel: "none" },
-        inbounds: [
-            {
-                port: $port,
-                protocol: "vless",
-                settings: {
-                    clients: [{ id: $uuid, flow: $flow }],
-                    decryption: $decryption
-                },
-                streamSettings: {
-                    sockopt: {
-                        trustedXForwardedFor: [
-                            "CF-Connecting-IP",
-                            "X-Real-IP"
-                        ],
-                        tcpcongestion: "bbr"
-                    },
-                    network: "xhttp",
-                    xhttpSettings: {
-                        path: $xhttp_path
-                    }
-                }
-            }
+# XHTTP Path 优先顺序
+if [ -n "$XHTTP_PATH" ]; then
+  FINAL_PATH="$XHTTP_PATH"
+elif [ -n "$OLD_PATH" ]; then
+  FINAL_PATH="$OLD_PATH"
+else
+  FINAL_PATH="/$(head -c 4 /dev/urandom | xxd -p 2>/dev/null || openssl rand -hex 4)"
+fi
+
+DEC_KEY="${VLESS_DECRYPTION:-$OLD_DEC}"
+ENC_KEY="${VLESS_ENCRYPTION:-$OLD_ENC}"
+
+# PQ 密钥生成
+if [ "$ENABLE_PQ" != "false" ] && { [ -z "$DEC_KEY" ] || [ -z "$ENC_KEY" ]; }; then
+  VLESSENC_OUT=$("$BIN" vlessenc 2>/dev/null || true)
+  PARSED_DEC=$(echo "$VLESSENC_OUT" | grep -A 2 'ML-KEM-768' | grep '"decryption"' | head -n1 | cut -d'"' -f4 || true)
+  PARSED_ENC=$(echo "$VLESSENC_OUT" | grep -A 2 'ML-KEM-768' | grep '"encryption"' | head -n1 | cut -d'"' -f4 || true)
+  
+  [ -n "$PARSED_DEC" ] && DEC_KEY="$PARSED_DEC"
+  [ -n "$PARSED_ENC" ] && ENC_KEY="$PARSED_ENC"
+fi
+
+# 保存状态到 .sys_data (纯文本写入)
+cat <<EOF > "$PERSIST_FILE"
+{
+  "uuid": "$FINAL_UUID",
+  "xhttp": "$FINAL_PATH",
+  "keys": {
+    "decryption": "$DEC_KEY",
+    "encryption": "$ENC_KEY"
+  }
+}
+EOF
+
+# ==================== 3. 纯 Shell 生成 Xray 配置 ====================
+ACTUAL_DEC="none"
+if [ "$ENABLE_PQ" != "false" ] && [ -n "$DEC_KEY" ]; then
+  ACTUAL_DEC="$DEC_KEY"
+fi
+
+cat <<EOF > "$CFG"
+{
+  "log": { "loglevel": "none" },
+  "inbounds": [
+    {
+      "port": $PORT,
+      "protocol": "vless",
+      "settings": {
+        "fallbacks": [
+          { "dest": $PORT_FALLBACK },
+          { "path": "/", "dest": 401 }
         ],
-        dns: {
-            servers: ["https+local://1.1.1.1/dns-query", "localhost"]
+        "decryption": "none"
+      }
+    },
+    {
+      "port": $PORT_FALLBACK,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "$FINAL_UUID", "flow": "$FLOW" }],
+        "decryption": "$ACTUAL_DEC"
+      },
+      "streamSettings": {
+        "sockopt": {
+          "trustedXForwardedFor": ["CF-Connecting-IP", "X-Real-IP"],
+          "tcpcongestion": "bbr"
         },
-        outbounds: [
+        "network": "xhttp",
+        "xhttpSettings": { "path": "$FINAL_PATH" }
+      }
+    }
+  ],
+  "dns": { "servers": ["https+local://1.1.1.1/dns-query", "localhost"] },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct",
+      "streamSettings": {
+        "finalmask": {
+          "tcp": [
             {
-                protocol: "freedom",
-                tag: "direct",
-                streamSettings: {
-                    finalmask: {
-                        tcp: [{
-                            type: "fragment",
-                            settings: {
-                                packets: "tlshello",
-                                length: "100-200",
-                                delay: "10-20",
-                                maxSplit: "3-6"
-                            }
-                        }]
-                    },
-                    sockopt: {
-                        tcpcongestion: "bbr",
-                        domainStrategy: "UseIP",
-                        happyEyeballs: { tryDelayMs: 250 }
-                    }
-                }
-            },
-            { protocol: "blackhole", tag: "block" }
-        ]
-    }' > "$CONFIG_FILE"
+              "type": "fragment",
+              "settings": {
+                "packets": "tlshello",
+                "length": "100-200",
+                "delay": "10-20",
+                "maxSplit": "3-6"
+              }
+            }
+          ]
+        },
+        "sockopt": {
+          "tcpcongestion": "bbr",
+          "domainStrategy": "UseIP",
+          "happyEyeballs": { "tryDelayMs": 250 }
+        }
+      }
+    },
+    { "protocol": "blackhole", "tag": "block" }
+  ]
+}
+EOF
 
-# 6. 打印链接并启动
-ENCODED_DOMAIN=$(printf '%s' "$CUSTOM_DOMAIN" | jq -sRr @uri)
-ENCODED_PATH=$(printf '%s' "$XHTTP_PATH" | jq -sRr @uri)
-ENCODED_ENCRYPTION=$(printf '%s' "$ENCRYPTION" | jq -sRr @uri)
-ENCODED_FLOW=$(printf '%s' "$FLOW" | jq -sRr @uri)
-ENCODED_REMARK=$(printf '%s' "$LINK_NAME" | jq -sRr @uri)
+# ==================== 4. 启动 Xray 核心 ====================
+"$BIN" -c "$CFG" >/dev/null 2>&1 &
+XRAY_PID=$!
 
-echo ""
-echo "============== Custom Domain =============="
-echo "vless://${UUID}@${CDN_HOST}:443?security=tls&encryption=${ENCODED_ENCRYPTION}&flow=${ENCODED_FLOW}&sni=${ENCODED_DOMAIN}&fp=random&alpn=h2&type=xhttp&path=${ENCODED_PATH}#${ENCODED_REMARK}"
-echo "============================================"
-echo ""
-mv "${TMP_DIR}/xray" "${TMP_DIR}/web" 
-exec "${TMP_DIR}/web" run -c "$CONFIG_FILE"
+# ==================== 5. 拼接节点链接 ====================
+ENCODED_REMARK=$(echo -n "$LINK_NAME" | od -An -tx1 | tr ' ' % | tr -d '\n' | tr '[:lower:]' '[:upper:]')
+[ -z "$ENCODED_REMARK" ] && ENCODED_REMARK="$LINK_NAME"
+
+URL_QUERY="security=tls&sni=${CUSTOM_DOMAIN}&fp=random&alpn=h2&type=xhttp&path=${FINAL_PATH}"
+if [ "$ENABLE_PQ" != "false" ] && [ -n "$ENC_KEY" ]; then
+  URL_QUERY="${URL_QUERY}&encryption=${ENC_KEY}"
+fi
+if [ -n "$FLOW" ]; then
+  URL_QUERY="${URL_QUERY}&flow=${FLOW}"
+fi
+
+LINK="vless://${FINAL_UUID}@${CDN_HOST}:443?${URL_QUERY}#${ENCODED_REMARK}"
+
+echo -e "\n${LINK}\n"
+echo "$LINK" > "$LINK_FILE"
+echo "✅ Running..."
+
+wait "$XRAY_PID"
