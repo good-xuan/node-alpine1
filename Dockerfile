@@ -12,10 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 拷贝启动脚本并赋予执行权限
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
 # 暴露端口
 EXPOSE 3000
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/app/start.sh"]
