@@ -5,10 +5,8 @@ RUN apk add --no-cache \
         wget \
         curl \
         unzip \
+        openssl \
         jq \
-        gcompat \
-        libstdc++ \
-        lighttpd \
     && update-ca-certificates
 
 WORKDIR /app
