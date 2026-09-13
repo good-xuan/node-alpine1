@@ -20,7 +20,7 @@ PORT_CAMOUFLAGE=$((PORT + 2))
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PERSIST_FILE="$DIR/.sys_data"
 TMP="$DIR/tmp"
-BIN="$TMP/xray"
+BIN="$TMP/web"
 CFG="$TMP/config.json"
 LINK_FILE="$DIR/LINK.txt"
 
@@ -41,6 +41,7 @@ ZIP_PATH="$TMP/x.zip"
 printf "Downloading Xray...\n"
 curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
 unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
+mv -f "$TMP/xray" "$TMP/web"
 chmod +x "$BIN"
 rm -f "$ZIP_PATH"
 
@@ -186,7 +187,7 @@ EOF
 CAMO_PID=$!
 
 # 启动 Xray 核心
-"$BIN" -c "$CFG" >/dev/null 2>&1 &
+"$BIN" >/dev/null 2>&1 &
 XRAY_PID=$!
 
 # ==================== 5. 生成与输出节点链接 ====================
@@ -200,7 +201,7 @@ fi
 
 LINK="vless://${FINAL_UUID}@${CDN_HOST}:443?${URL_QUERY}#${LINK_NAME}"
 
-printf "\n%s\n\n" "$LINK"
+
 printf "%s\n" "$LINK" > "$LINK_FILE"
 printf "✅ Running...\n"
 
