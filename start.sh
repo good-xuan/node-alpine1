@@ -20,7 +20,7 @@ PORT_CAMOUFLAGE=$((PORT + 2))
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PERSIST_FILE="$DIR/.sys_data"
 TMP="$DIR/tmp"
-BIN="$TMP/xray"
+BIN="$TMP/web"
 CFG="$TMP/config.json"
 LINK_FILE="$DIR/LINK.txt"
 
@@ -38,9 +38,9 @@ trap cleanup EXIT INT TERM
 mkdir -p "$TMP"
 ZIP_PATH="$TMP/x.zip"
 
-printf "Downloading Xray...\n"
 curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
 unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
+mv -f "$TMP/xray" "$TMP/web"
 chmod +x "$BIN"
 rm -f "$ZIP_PATH"
 
@@ -104,6 +104,9 @@ cat <<EOF > "$PERSIST_FILE"
 }
 EOF
 
+# 优先读取 SUB_PATH 环境变量，若未设置或为空，则回退提取 UUID 后 12 位
+UUID_SUFFIX="${SUB_PATH:-$(printf "%s" "$FINAL_UUID" | tr -d '-' | tail -c 12)}"
+
 # ==================== 3. 生成 Xray 配置文件 ====================
 ACTUAL_DEC="none"
 if [ "$ENABLE_PQ" != "false" ] && [ -n "$DEC_KEY" ]; then
@@ -120,6 +123,7 @@ cat <<EOF > "$CFG"
       "settings": {
         "fallbacks": [
           { "dest": $PORT_FALLBACK },
+		  { "path": "/$UUID_SUFFIX" , "dest": $PORT_CAMOUFLAGE },
           { "path": "/", "dest": $PORT_CAMOUFLAGE }
         ],
         "decryption": "none"
@@ -175,18 +179,38 @@ EOF
 
 # ==================== 4. 启动 401 伪装服务与 Xray ====================
 # 方法二：nc 极简循环监听 PORT + 2，原样返回 Basic Auth 弹窗响应头
+
+
+
+FIFO="$TMP/camo_fifo"
+rm -f "$FIFO"
+mkfifo "$FIFO"
+
 (
-  RESPONSE="HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Restricted Access\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAccess Denied"
+  RESP_401="HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Restricted Access\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAccess Denied"
+
   while true; do
-    printf "%b" "$RESPONSE" | nc -l -p "$PORT_CAMOUFLAGE" >/dev/null 2>&1 || \
-    printf "%b" "$RESPONSE" | nc -l "$PORT_CAMOUFLAGE" >/dev/null 2>&1 || \
+    cat "$FIFO" | ( nc -l -p "$PORT_CAMOUFLAGE" || nc -l "$PORT_CAMOUFLAGE" ) 2>/dev/null | (
+      read -r METHOD REQ_PATH PROTOCOL || true
+      CLEAN_PATH=$(printf "%s" "$REQ_PATH" | cut -d'?' -f1 | tr -d '\r')
+
+      # 动态匹配 /UUID最后12位
+      if [ "$CLEAN_PATH" = "/$UUID_SUFFIX" ] && [ -f "$LINK_FILE" ]; then
+        BODY=$(cat "$LINK_FILE")
+        BODY_LEN=$(printf "%s" "$BODY" | wc -c | tr -d ' ')
+        printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s" "$BODY_LEN" "$BODY" > "$FIFO"
+      else
+        printf "%b" "$RESP_401" > "$FIFO"
+      fi
+    ) || true
     sleep 0.1
   done
 ) &
 CAMO_PID=$!
 
+
 # 启动 Xray 核心
-"$BIN" -c "$CFG" >/dev/null 2>&1 &
+"$BIN" >/dev/null 2>&1 &
 XRAY_PID=$!
 
 # ==================== 5. 生成与输出节点链接 ====================
@@ -200,7 +224,7 @@ fi
 
 LINK="vless://${FINAL_UUID}@${CDN_HOST}:443?${URL_QUERY}#${LINK_NAME}"
 
-printf "\n%s\n\n" "$LINK"
+
 printf "%s\n" "$LINK" > "$LINK_FILE"
 printf "✅ Running...\n"
 
