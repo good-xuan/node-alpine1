@@ -146,7 +146,7 @@ cat <<EOF > "$CFG"
       }
     }
   ],
-  "dns": { "servers": ["https+local://1.1.1.1/dns-query", "localhost"] },
+  "dns": { "servers": ["https+local://1.1.1.1/dns-query", "1.1.1.1","8.8.8.8"] },
   "outbounds": [
     {
       "protocol": "freedom",
