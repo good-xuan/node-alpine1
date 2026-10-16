@@ -146,7 +146,7 @@ cat <<EOF > "$CFG"
       }
     }
   ],
-  "dns": { "servers": ["1.1.1.1","8.8.8.8"] },
+  "dns": { "servers": ["https+local://1.1.1.1/dns-query","1.1.1.1","8.8.8.8"] },
   "outbounds": [
     {
       "protocol": "freedom",
@@ -154,7 +154,7 @@ cat <<EOF > "$CFG"
       "streamSettings": {
         "sockopt": {
           "tcpcongestion": "bbr",
-          "domainStrategy": "UseIP"
+          "domainStrategy": "UseIPv4v6"
         }
       }
     },
