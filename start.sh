@@ -38,7 +38,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "$TMP"
 ZIP_PATH="$TMP/x.zip"
 
-curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v26.10.10/Xray-linux-64.zip" -o "$ZIP_PATH"
+curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
 unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
 mv -f "$TMP/xray" "$TMP/web"
 chmod +x "$BIN"
@@ -146,29 +146,15 @@ cat <<EOF > "$CFG"
       }
     }
   ],
-  "dns": { "servers": ["https+local://1.1.1.1/dns-query", "1.1.1.1","8.8.8.8"] },
+  "dns": { "servers": ["1.1.1.1","8.8.8.8"] },
   "outbounds": [
     {
       "protocol": "freedom",
       "tag": "direct",
       "streamSettings": {
-        "finalmask": {
-          "tcp": [
-            {
-              "type": "fragment",
-              "settings": {
-                "packets": "tlshello",
-                "length": "100-200",
-                "delay": "10-20",
-                "maxSplit": "3-6"
-              }
-            }
-          ]
-        },
         "sockopt": {
           "tcpcongestion": "bbr",
-          "domainStrategy": "UseIP",
-          "happyEyeballs": { "tryDelayMs": 250 }
+          "domainStrategy": "UseIP"
         }
       }
     },
