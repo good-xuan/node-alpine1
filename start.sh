@@ -38,7 +38,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "$TMP"
 ZIP_PATH="$TMP/x.zip"
 
-curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
+curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v26.10.10/Xray-linux-64.zip" -o "$ZIP_PATH"
 unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
 mv -f "$TMP/xray" "$TMP/web"
 chmod +x "$BIN"
