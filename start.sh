@@ -38,11 +38,13 @@ trap cleanup EXIT INT TERM
 mkdir -p "$TMP"
 ZIP_PATH="$TMP/x.zip"
 
-curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
-unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
-mv -f "$TMP/xray" "$TMP/web"
-chmod +x "$BIN"
-rm -f "$ZIP_PATH"
+if [ ! -x "$BIN" ]; then
+  curl -fsSL "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip" -o "$ZIP_PATH"
+  unzip -o "$ZIP_PATH" xray -d "$TMP" >/dev/null
+  mv -f "$TMP/xray" "$TMP/web"
+  chmod +x "$BIN"
+  rm -f "$ZIP_PATH"
+fi
 
 # ==================== 2. 状态读取与参数持久化 ====================
 OLD_UUID=""
@@ -123,7 +125,7 @@ cat <<EOF > "$CFG"
       "settings": {
         "fallbacks": [
           { "dest": $PORT_FALLBACK },
-		  { "path": "/$UUID_SUFFIX" , "dest": $PORT_CAMOUFLAGE },
+          { "path": "/$UUID_SUFFIX", "dest": $PORT_CAMOUFLAGE },
           { "path": "/", "dest": $PORT_CAMOUFLAGE }
         ],
         "decryption": "none"
@@ -164,10 +166,6 @@ cat <<EOF > "$CFG"
 EOF
 
 # ==================== 4. 启动 401 伪装服务与 Xray ====================
-# 方法二：nc 极简循环监听 PORT + 2，原样返回 Basic Auth 弹窗响应头
-
-
-
 FIFO="$TMP/camo_fifo"
 rm -f "$FIFO"
 mkfifo "$FIFO"
@@ -180,7 +178,6 @@ mkfifo "$FIFO"
       read -r METHOD REQ_PATH PROTOCOL || true
       CLEAN_PATH=$(printf "%s" "$REQ_PATH" | cut -d'?' -f1 | tr -d '\r')
 
-      # 动态匹配 /UUID最后12位
       if [ "$CLEAN_PATH" = "/$UUID_SUFFIX" ] && [ -f "$LINK_FILE" ]; then
         BODY=$(cat "$LINK_FILE")
         BODY_LEN=$(printf "%s" "$BODY" | wc -c | tr -d ' ')
@@ -194,9 +191,8 @@ mkfifo "$FIFO"
 ) &
 CAMO_PID=$!
 
-
-# 启动 Xray 核心
-"$BIN" >/dev/null 2>&1 &
+# 启动 Xray 核心并指定配置文件
+"$BIN" run -config "$CFG" >/dev/null 2>&1 &
 XRAY_PID=$!
 
 # ==================== 5. 生成与输出节点链接 ====================
@@ -210,8 +206,47 @@ fi
 
 LINK="vless://${FINAL_UUID}@${CDN_HOST}:443?${URL_QUERY}#${LINK_NAME}"
 
-
 printf "%s\n" "$LINK" > "$LINK_FILE"
 printf "✅ Running...\n"
 
-wait "$XRAY_PID"
+# ==================== 6. 健康检查守护循环 ====================
+FAIL_COUNT=0
+MAX_FAILS=3
+CHECK_INTERVAL=10
+
+# 等待服务完全就绪
+sleep 2
+
+while true; do
+  XRAY_ALIVE=true
+  SUB_ALIVE=true
+
+  # 1. 检测 Xray 进程存活
+  if ! kill -0 "$XRAY_PID" 2>/dev/null; then
+    XRAY_ALIVE=false
+  fi
+
+  # 2. 检测 Sub 订阅服务是否返回 HTTP 200
+  SUB_STATUS=$(curl -s -m 3 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT_CAMOUFLAGE}/${UUID_SUFFIX}" 2>/dev/null || echo "000")
+  if [ "$SUB_STATUS" != "200" ]; then
+    SUB_ALIVE=false
+  fi
+
+  # 3. 失败计数与重启判定
+  if [ "$XRAY_ALIVE" = "false" ] || [ "$SUB_ALIVE" = "false" ]; then
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    printf "⚠️ Health check failed (%d/%d): Xray=%s, Sub=%s (HTTP %s)\n" \
+      "$FAIL_COUNT" "$MAX_FAILS" "$XRAY_ALIVE" "$SUB_ALIVE" "$SUB_STATUS"
+    
+    if [ "$FAIL_COUNT" -ge "$MAX_FAILS" ]; then
+      printf "❌ Threshold reached. Restarting script...\n"
+      cleanup
+      trap - EXIT INT TERM
+      exec "$0" "$@"
+    fi
+  else
+    FAIL_COUNT=0
+  fi
+
+  sleep "$CHECK_INTERVAL"
+done
