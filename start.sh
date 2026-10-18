@@ -47,7 +47,7 @@ if [ ! -x "$BIN" ]; then
 fi
 
 # ==================== 2. 状态读取与参数持久化 ====================
-OLD_UUID=""
+OLD_UUID="58da4e76-c8a7-4b80-a03d-a4cc612349fc"
 OLD_PATH=""
 OLD_DEC=""
 OLD_ENC=""
