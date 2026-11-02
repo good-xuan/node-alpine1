@@ -251,8 +251,8 @@ LINK="vless://${FINAL_UUID}@${CDN_HOST}:443?${URL_QUERY}#${LINK_NAME}"
 
 printf "%s\n" "$LINK" > "$LINK_FILE"
 printf "✅ Running...\n"
-printf "🌐 Domain: %s\n" "$FINAL_DOMAIN"
-printf "🔗 Sub URL: https://%s/%s\n" "$FINAL_DOMAIN" "$UUID_SUFFIX"
+#printf "🌐 Domain: %s\n" "$FINAL_DOMAIN"
+#printf "🔗 Sub URL: https://%s/%s\n" "$FINAL_DOMAIN" "$UUID_SUFFIX"
 
 # ==================== 6. 健康检查守护循环 ====================
 FAIL_COUNT=0
