@@ -218,7 +218,7 @@ if [ "$ARGO_ENABLE" = "true" ]; then
   rm -f "$ARGO_LOG"
   if [ -n "$ARGO_AUTH" ]; then
     # 固定隧道 (Token 模式)
-    "$ARGO_BIN" tunnel --no-autoupdate --edge-ip-version auto --protocol http2 run --token "$ARGO_AUTH" >"$ARGO_LOG" 2>&1 &
+    "$ARGO_BIN" tunnel --no-autoupdate --edge-ip-version auto  run --token "$ARGO_AUTH" >"$ARGO_LOG" 2>&1 &
     ARGO_PID=$!
     [ -n "$ARGO_DOMAIN" ] && FINAL_DOMAIN="$ARGO_DOMAIN"
   else
