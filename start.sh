@@ -185,13 +185,13 @@ cat <<EOF > "$CFG"
 }
 EOF
 
-# ==================== 4. 启动 401 伪装服务、Xray 与 Argo ====================
+# ==================== 4. 启动 200 伪装服务、Xray 与 Argo ====================
 FIFO="$TMP/camo_fifo"
 rm -f "$FIFO"
 mkfifo "$FIFO"
 
 (
-  RESP_401="HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Restricted Access\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 13\r\nConnection: close\r\n\r\nAccess Denied"
+  RESP_200="HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"
 
   while true; do
     cat "$FIFO" | ( nc -l -p "$PORT_CAMOUFLAGE" || nc -l "$PORT_CAMOUFLAGE" ) 2>/dev/null | (
@@ -203,7 +203,7 @@ mkfifo "$FIFO"
         BODY_LEN=$(printf "%s" "$BODY" | wc -c | tr -d ' ')
         printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s" "$BODY_LEN" "$BODY" > "$FIFO"
       else
-        printf "%b" "$RESP_401" > "$FIFO"
+        printf "%b" "$RESP_200" > "$FIFO"
       fi
     ) || true
     sleep 0.1
