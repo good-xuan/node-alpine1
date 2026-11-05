@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        default: "debian-slim"
+        default: "debian-slim-argo"
 
 env:
   REGISTRY: ghcr.io
