@@ -7,6 +7,7 @@ LINK_NAME="${LINK_NAME:-Node}"
 CDN_HOST="${CDN_HOST:-www.visa.com.sg}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-}"
 ENABLE_PQ="${ENABLE_PQ:-true}"
+KEEP_ALIVE_URL="${KEEP_ALIVE_URL:-https://www.google.com}"
 
 # Argo 隧道环境变量
 # ARGO_ENABLE: 是否启用 Argo 隧道 (true/false)
@@ -38,11 +39,13 @@ LINK_FILE="$DIR/LINK.txt"
 XRAY_PID=""
 CAMO_PID=""
 ARGO_PID=""
+KEEP_PID=""
 
 cleanup() {
   [ -n "$XRAY_PID" ] && kill "$XRAY_PID" 2>/dev/null || true
   [ -n "$CAMO_PID" ] && kill "$CAMO_PID" 2>/dev/null || true
   [ -n "$ARGO_PID" ] && kill "$ARGO_PID" 2>/dev/null || true
+  [ -n "$KEEP_PID" ] && kill "$KEEP_PID" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -218,7 +221,7 @@ if [ "$ARGO_ENABLE" = "true" ]; then
   rm -f "$ARGO_LOG"
   if [ -n "$ARGO_AUTH" ]; then
     # 固定隧道 (Token 模式)
-    "$ARGO_BIN" tunnel --no-autoupdate --edge-ip-version auto  run --token "$ARGO_AUTH" >"$ARGO_LOG" 2>&1 &
+    "$ARGO_BIN" tunnel --no-autoupdate --edge-ip-version auto run --token "$ARGO_AUTH" >"$ARGO_LOG" 2>&1 &
     ARGO_PID=$!
     [ -n "$ARGO_DOMAIN" ] && FINAL_DOMAIN="$ARGO_DOMAIN"
   else
@@ -254,7 +257,21 @@ printf "✅ Running...\n"
 #printf "🌐 Domain: %s\n" "$FINAL_DOMAIN"
 #printf "🔗 Sub URL: https://%s/%s\n" "$FINAL_DOMAIN" "$UUID_SUFFIX"
 
-# ==================== 6. 健康检查守护循环 ====================
+# ==================== 6. 启动每 20 秒保活任务 ====================
+(
+  while true; do
+    if [ -n "$KEEP_ALIVE_URL" ]; then
+      curl -fsSL -I -m 5 "$KEEP_ALIVE_URL" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$FINAL_DOMAIN" ]; then
+      curl -fsSL -I -m 5 "https://${FINAL_DOMAIN}" >/dev/null 2>&1 || true
+    fi
+    sleep 20
+  done
+) &
+KEEP_PID=$!
+
+# ==================== 7. 健康检查守护循环 ====================
 FAIL_COUNT=0
 MAX_FAILS=3
 CHECK_INTERVAL=10
