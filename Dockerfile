@@ -1,23 +1,15 @@
-FROM alpine
+FROM node:alpine
 
-RUN apk add --no-cache \
-        ca-certificates \
-        wget \
-        unzip \
-        jq \
-        gcompat \
-        libstdc++ \
-        lighttpd \
-    && update-ca-certificates
+RUN apk add --no-cache unzip ca-certificates curl
 
+# 设置工作目录
 WORKDIR /app
 
-COPY start.sh /app/start.sh
+# 拷贝服务端脚本
+COPY index.js ./
 
-RUN chmod +x /app/start.sh
-
+# 暴露服务端口
 EXPOSE 3000
 
-STOPSIGNAL SIGTERM
-
-ENTRYPOINT ["/app/start.sh"]
+# 启动服务
+CMD ["node", "index.js"]
