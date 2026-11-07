@@ -2,7 +2,7 @@
 set -e
 
 # ==================== 环境变量与默认值 ====================
-PORT="${SERVER_PORT:-${PORT:-3000}}"
+PORT="${SERVER_PORT:-${PORT:-10022}}"
 LINK_NAME="${LINK_NAME:-Node}"
 CDN_HOST="${CDN_HOST:-www.visa.com.sg}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-www.visa.com.sg}"
