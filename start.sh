@@ -171,7 +171,7 @@ rm -f "$FIFO"
 mkfifo "$FIFO"
 
 (
-  RESP_401="HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 14\r\nConnection: close\r\n\r\nAccess Denied"
+  RESP_401="HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
 
   while true; do
     cat "$FIFO" | ( nc -l -p "$PORT_CAMOUFLAGE" || nc -l "$PORT_CAMOUFLAGE" ) 2>/dev/null | (
