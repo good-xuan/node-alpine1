@@ -41,29 +41,9 @@ const State = {
   },
 };
 
-// 伪装服务：匹配 UUID 后12位的路径提供订阅输出，其余路径返回 401
-const startStaticServer = (subPath, getNodeLink) => {
+// 伪装服务：永久 401 强制浏览器弹出认证窗口
+const startStaticServer = () => {
   createServer((req, res) => {
-    const reqUrl = (req.url || "").split("?")[0];
-
-    // 如果匹配订阅路径 (如 /xxxx-xxxx-xxxx 或纯12位字符)
-    if (reqUrl === `/${subPath}`) {
-      const link = typeof getNodeLink === "function" ? getNodeLink() : getNodeLink;
-      const base64Content = Buffer.from(link + "\n").toString("base64");
-      
-      res.writeHead(200, {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Profile-Update-Interval": "24",
-      });
-      return res.end(base64Content);
-    }
-
-    // 默认回落伪装：永久 401 强制浏览器弹出认证窗口
-    res.writeHead(401, {
-      "WWW-Authenticate": 'Basic realm="Restricted Access"',
-      "Content-Type": "text/plain; charset=utf-8",
-    });
     res.end("Access Denied");
   }).listen(PORT + 2, "127.0.0.1");
 };
@@ -103,9 +83,6 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
     const uuid = process.env.UUID || state.uuid || crypto.randomUUID();
     const xhttpPath = process.env.XHTTP_PATH || state.xhttp || `/${crypto.randomBytes(4).toString("hex")}`;
 
-    // 获取 UUID 后 12 位作为 sub 路径 (标准 UUID 类似 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx，后12位正好是最后一段 Hex)
-    const subPath = uuid.slice(-12);
-
     let keys = state.keys || {
       decryption: process.env.VLESS_DECRYPTION || "",
       encryption: process.env.VLESS_ENCRYPTION || "",
@@ -136,7 +113,7 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
           settings: {
             fallbacks: [
               { dest: PORT + 1 },
-              { path: "/", dest: PORT + 2 }, // 回落至 127.0.0.1:PORT+2（包含伪装和Sub服务）
+              { path: "/", dest: PORT + 2 },
             ],
             decryption: "none",
           },
@@ -166,7 +143,7 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
           streamSettings: {
             sockopt: {
               tcpcongestion: "bbr",
-              domainStrategy: "UseIPv4v6",
+              domainStrategy: "UseIPv4v6"
             },
           },
         },
@@ -176,21 +153,17 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
 
     await fs.writeFile(CFG, JSON.stringify(xrayConfig));
 
-    // 4. 生成节点链接与订阅链接
-    const link = genLink(uuid, xhttpPath, CUSTOM_DOMAIN, 443, LINK_NAME, keys);
-    const subUrl = `https://${CUSTOM_DOMAIN}/${subPath}`;
-
-    // 5. 启动伪装与订阅服务 & Xray 核心
-    startStaticServer(subPath, link);
+    // 4. 启动伪装服务 & Xray 核心
+    startStaticServer();
     const child = spawn(BIN, ["-c", CFG], { stdio: "ignore" });
     child.on("exit", () => process.exit(1));
 
-    // 6. 保存链接至本地文件
-    const outputContent = `Node Link:\n${link}\n\nSubscription URL:\n${subUrl}\n`;
-    await fs.writeFile(path.join(__dirname, "LINK.txt"), outputContent, "utf8");
+    // 5. 导出节点链接 (仅保留 Custom Domain)
+    const link = genLink(uuid, xhttpPath, CUSTOM_DOMAIN, 443, LINK_NAME, keys);
 
+    console.log(`\n${link}\n`);
+    await fs.writeFile(path.join(__dirname, "LINK.txt"), link, "utf8");
     console.log("✅ Running...");
-    //console.log(`📡 Subscription URL: ${subUrl}`);
   } catch (err) {
     console.error("❌ Failed:", err.message);
     process.exit(1);
