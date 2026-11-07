@@ -16,6 +16,6 @@ COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
 # 暴露端口
-EXPOSE 3000
+EXPOSE 10022
 
 ENTRYPOINT ["/app/start.sh"]
