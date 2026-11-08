@@ -1,5 +1,5 @@
 const fs = require("fs/promises");
-const { createWriteStream } = require("fs");
+const { createWriteStream, existsSync } = require("fs");
 const { createServer } = require("http");
 const path = require("path");
 const { spawn, exec } = require("child_process");
@@ -9,21 +9,35 @@ const { pipeline } = require("stream/promises");
 
 const execAsync = util.promisify(exec);
 
+// ==================== 环境变量与默认值 ====================
 const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || 3000, 10);
 const LINK_NAME = process.env.LINK_NAME || "Node";
 const CDN_HOST = process.env.CDN_HOST || "www.visa.com.sg";
-const CUSTOM_DOMAIN = process.env.CUSTOM_DOMAIN || "www.visa.com.sg";
+const CUSTOM_DOMAIN = process.env.CUSTOM_DOMAIN || "";
+const SUB_PATH = process.env.SUB_PATH || "";
 const ENABLE_PQ = process.env.ENABLE_PQ !== "false";
 const FLOW = ENABLE_PQ ? "xtls-rprx-vision" : "";
-const PERSIST_FILE = path.join(__dirname, ".sys_data");
 
+// Argo 隧道环境变量
+const ARGO_ENABLE = process.env.ARGO_ENABLE !== "false";
+const ARGO_AUTH = process.env.ARGO_AUTH || "";
+const ARGO_DOMAIN = process.env.ARGO_DOMAIN || "";
+
+const PERSIST_FILE = path.join(__dirname, ".sys_data");
+const LINK_FILE = path.join(__dirname, "LINK.txt");
 const TMP = path.join(__dirname, "tmp");
-const BIN = path.join(TMP, "xray");
+const BIN = path.join(TMP, "web");
+const ARGO_BIN = path.join(TMP, "bot");
 const CFG = path.join(TMP, "config.json");
+
+// 自动识别 CPU 架构
+const IS_ARM = process.arch === "arm64" || process.arch === "aarch64";
+const XRAY_ARCH = IS_ARM ? "arm64-v8a" : "64";
+const CF_ARCH = IS_ARM ? "arm64" : "amd64";
 
 const download = async (url, dest) => {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Fetch failed: ${res.statusText}`);
+  if (!res.ok) throw new Error(`Fetch failed (${res.status}): ${url}`);
   await pipeline(res.body, createWriteStream(dest));
 };
 
@@ -41,11 +55,75 @@ const State = {
   },
 };
 
-// 伪装服务：永久 401 强制浏览器弹出认证窗口
-const startStaticServer = () => {
-  createServer((req, res) => {
+// 伪装服务：支持 /<subPath> 订阅拉取，其余路径永久返回 401
+const startStaticServer = (subPath) => {
+  createServer(async (req, res) => {
+    const cleanPath = (req.url || "/").split("?")[0];
+    if (subPath && cleanPath === `/${subPath}`) {
+      try {
+        const body = await fs.readFile(LINK_FILE, "utf8");
+        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        return res.end(body);
+      } catch {}
+    }
+    res.writeHead(401, {
+      "WWW-Authenticate": 'Basic realm="Restricted Access"',
+      "Content-Type": "text/plain; charset=utf-8",
+    });
     res.end("Access Denied");
   }).listen(PORT + 2, "127.0.0.1");
+};
+
+// 启动 Cloudflare Argo 隧道并解析域名
+const startArgo = () => {
+  return new Promise((resolve) => {
+    let args;
+    const isFixed = Boolean(ARGO_AUTH);
+
+    if (isFixed) {
+      // 自动提取纯 eyJ... Token，防止误粘贴整条安装命令
+      const tokenMatch = ARGO_AUTH.match(/eyJ[A-Za-z0-9_-]+/);
+      const cleanToken = tokenMatch ? tokenMatch[0] : ARGO_AUTH.trim();
+      args = ["tunnel", "--no-autoupdate", "--edge-ip-version", "auto", "--protocol", "http2", "run", "--token", cleanToken];
+    } else {
+      args = ["tunnel", "--no-autoupdate", "--edge-ip-version", "auto", "--protocol", "http2", "--url", `http://127.0.0.1:${PORT}`];
+    }
+
+    const argo = spawn(ARGO_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let resolved = false;
+
+    const onOutput = (data) => {
+      const text = data.toString();
+      if (!isFixed && !resolved) {
+        const match = text.match(/https:\/\/([-a-zA-Z0-9.]+\.trycloudflare\.com)/);
+        if (match) {
+          resolved = true;
+          resolve({ proc: argo, domain: match[1] });
+        }
+      }
+    };
+
+    argo.stdout.on("data", onOutput);
+    argo.stderr.on("data", onOutput);
+
+    argo.on("exit", (code) => {
+      console.error(`❌ Argo exited with code ${code}`);
+      process.exit(1);
+    });
+
+    if (isFixed) {
+      resolved = true;
+      resolve({ proc: argo, domain: ARGO_DOMAIN || CUSTOM_DOMAIN || CDN_HOST });
+    } else {
+      // 临时隧道最长等待 15 秒超时回退
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve({ proc: argo, domain: CUSTOM_DOMAIN || CDN_HOST });
+        }
+      }, 15000);
+    }
+  });
 };
 
 const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
@@ -57,6 +135,7 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
   }
   if (FLOW) p.set("flow", FLOW);
   p.set("sni", host);
+  //p.set("host", host);
   p.set("fp", "random");
   p.set("alpn", "h2");
   p.set("type", "xhttp");
@@ -66,22 +145,45 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
 };
 
 (async () => {
+  const children = [];
+  const cleanup = () => {
+    for (const proc of children) {
+      try {
+        proc.kill();
+      } catch {}
+    }
+  };
+  process.on("exit", cleanup);
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+
   try {
     await fs.mkdir(TMP, { recursive: true });
 
-    // 1. 下载并解压 Xray
-    const zipPath = path.join(TMP, "x.zip");
-    await download(
-      "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip",
-      zipPath
-    );
-    await execAsync(`unzip -o "${zipPath}" xray -d "${TMP}" && chmod +x "${BIN}"`);
-    await fs.unlink(zipPath).catch(() => {});
+    // 1. 下载并解压 Xray 与 Cloudflared (若已存在则跳过)
+    if (!existsSync(BIN)) {
+      const zipPath = path.join(TMP, "x.zip");
+      await download(
+        `https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip`,
+        zipPath
+      );
+      await execAsync(`unzip -o "${zipPath}" xray -d "${TMP}" && mv -f "${path.join(TMP, "xray")}" "${BIN}" && chmod +x "${BIN}"`);
+      await fs.unlink(zipPath).catch(() => {});
+    }
+
+    if (ARGO_ENABLE && !existsSync(ARGO_BIN)) {
+      await download(
+        `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}`,
+        ARGO_BIN
+      );
+      await fs.chmod(ARGO_BIN, 0o755);
+    }
 
     // 2. 状态读取与 UUID/Path/PQ 密钥持久化保存
     const state = await State.load();
     const uuid = process.env.UUID || state.uuid || crypto.randomUUID();
     const xhttpPath = process.env.XHTTP_PATH || state.xhttp || `/${crypto.randomBytes(4).toString("hex")}`;
+    const subPath = SUB_PATH || uuid.replace(/-/g, "").slice(-12);
 
     let keys = state.keys || {
       decryption: process.env.VLESS_DECRYPTION || "",
@@ -100,10 +202,9 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
       } catch {}
     }
 
-    // 保存 uuid, xhttp, keys 到 .sys_data
     await State.save({ uuid, xhttp: xhttpPath, keys });
 
-    // 3. 原版 Xray 配置
+    // 3. 生成 Xray 配置
     const xrayConfig = {
       log: { loglevel: "none" },
       inbounds: [
@@ -113,6 +214,7 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
           settings: {
             fallbacks: [
               { dest: PORT + 1 },
+              { path: `/${subPath}`, dest: PORT + 2 },
               { path: "/", dest: PORT + 2 },
             ],
             decryption: "none",
@@ -143,7 +245,7 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
           streamSettings: {
             sockopt: {
               tcpcongestion: "bbr",
-              domainStrategy: "UseIPv4v6"
+              domainStrategy: "UseIPv4v6",
             },
           },
         },
@@ -153,17 +255,30 @@ const genLink = (uuid, xhttpPath, host, port, remarks, keys) => {
 
     await fs.writeFile(CFG, JSON.stringify(xrayConfig));
 
-    // 4. 启动伪装服务 & Xray 核心
-    startStaticServer();
-    const child = spawn(BIN, ["-c", CFG], { stdio: "ignore" });
-    child.on("exit", () => process.exit(1));
+    // 4. 启动伪装订阅服务、Xray 核心与 Argo 隧道
+    startStaticServer(subPath);
 
-    // 5. 导出节点链接 (仅保留 Custom Domain)
-    const link = genLink(uuid, xhttpPath, CUSTOM_DOMAIN, 443, LINK_NAME, keys);
+    const xrayProc = spawn(BIN, ["run", "-config", CFG], { stdio: "ignore" });
+    children.push(xrayProc);
+    xrayProc.on("exit", (code) => {
+      console.error(`❌ Xray exited with code ${code}`);
+      process.exit(1);
+    });
 
-    console.log(`\n${link}\n`);
-    await fs.writeFile(path.join(__dirname, "LINK.txt"), link, "utf8");
+    let finalDomain = CUSTOM_DOMAIN || CDN_HOST;
+    if (ARGO_ENABLE) {
+      const { proc: argoProc, domain } = await startArgo();
+      children.push(argoProc);
+      finalDomain = domain;
+    }
+
+    // 5. 导出节点链接
+    const link = genLink(uuid, xhttpPath, finalDomain, 443, LINK_NAME, keys);
+
+    await fs.writeFile(LINK_FILE, `${link}\n`, "utf8");
     console.log("✅ Running...");
+    console.log(`🌐 Domain: ${finalDomain}`);
+    console.log(`🔗 Sub URL: https://${finalDomain}/${subPath}`);
   } catch (err) {
     console.error("❌ Failed:", err.message);
     process.exit(1);
