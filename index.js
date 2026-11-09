@@ -66,10 +66,6 @@ const startStaticServer = (subPath) => {
         return res.end(body);
       } catch {}
     }
-    res.writeHead(401, {
-      "WWW-Authenticate": 'Basic realm="Restricted Access"',
-      "Content-Type": "text/plain; charset=utf-8",
-    });
     res.end("Access Denied");
   }).listen(PORT + 2, "127.0.0.1");
 };
