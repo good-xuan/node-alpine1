@@ -80,7 +80,7 @@ const startArgo = () => {
       // 自动提取纯 eyJ... Token，防止误粘贴整条安装命令
       const tokenMatch = ARGO_AUTH.match(/eyJ[A-Za-z0-9_-]+/);
       const cleanToken = tokenMatch ? tokenMatch[0] : ARGO_AUTH.trim();
-      args = ["tunnel", "--no-autoupdate", "--edge-ip-version", "auto", "--protocol", "http2", "run", "--token", cleanToken];
+      args = ["tunnel", "--no-autoupdate", "--edge-ip-version", "auto",  "run", "--token", cleanToken];
     } else {
       args = ["tunnel", "--no-autoupdate", "--edge-ip-version", "auto", "--protocol", "http2", "--url", `http://127.0.0.1:${PORT}`];
     }
